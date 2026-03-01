@@ -1,6 +1,6 @@
 # BoostedTravel
 
-Agent-native, CLI-native flight search & booking. Search 400+ airlines and book tickets straight from the terminal — no browser, no scraping, no token-burning automation. Built for AI agents and developers who need travel built into their workflow.
+Agent-native flight search & booking. 400+ airlines, straight from the terminal — no browser, no scraping. Built for AI agents and developers.
 
 **API Base URL:** `https://api.boostedchat.com`
 
@@ -8,91 +8,54 @@ Agent-native, CLI-native flight search & booking. Search 400+ airlines and book 
 [![PyPI](https://img.shields.io/pypi/v/boostedtravel)](https://pypi.org/project/boostedtravel/)
 [![npm](https://img.shields.io/npm/v/boostedtravel)](https://www.npmjs.com/package/boostedtravel)
 
-## Why BoostedTravel Exists
+## Why BoostedTravel?
 
-AI agents need a native, CLI-based way to search and book flights, hotels, and travel experiences. Without it, agents either burn massive amounts of tokens on browser automation and scraping — or simply can't do it at all. That's unacceptable in situations where time and cost matter.
-
-BoostedTravel is an agent-native interface to find flights and everything travel-related. One command, real results, real bookings.
-
-**You don't pay extra for the brand of a website.** Flight websites like Booking.com, Expedia, Google Flights, and Kayak inflate prices based on demand patterns, cookie tracking, browser fingerprinting, and surge pricing. The same flight that shows as $350 on those sites is often **$20–$50 cheaper** through BoostedTravel — because we return the raw airline price with zero markup or bias. Same flight, same airline, same seat — just cheaper.
-
-## Price: BoostedTravel vs. Flight Websites
+Flight websites inflate prices with demand tracking, cookie-based pricing, and surge markup. The same flight is often **$20–$50 cheaper** through BoostedTravel — raw airline price, zero markup.
 
 | | Google Flights / Booking.com / Expedia | **BoostedTravel** |
 |---|---|---|
-| Search flights | Free | **Free** |
-| View full offer details & price | Free (with tracking/inflation) | **Free** (no tracking, no bias) |
-| Book flight (checkout) | Ticket + website markup + surge pricing | **$1 unlock + ticket price** (no markup) |
-| Price changes on repeat search? | Yes — goes up | **Never** |
-| Total extra cost | $20–$50+ hidden in inflated price | **$1 flat** |
+| Search | Free | **Free** |
+| View details & price | Free (with tracking/inflation) | **Free** (no tracking) |
+| Book | Ticket + hidden markup | **$1 unlock + ticket price** |
+| Price goes up on repeat search? | Yes | **Never** |
 
-The $1 unlock is the only fee. You search for free, find exactly what you need with all the details, and only pay $1 to confirm the price and open checkout. After that, booking is free — you pay only the actual airline ticket price.
-
-## Install
-
-### CLI (Python — recommended for agents)
+## Quick Start
 
 ```bash
 pip install boostedtravel
-```
 
-This gives you the `boostedtravel` command in your terminal:
-
-```bash
-# Register and get your API key
 boostedtravel register --name my-agent --email you@example.com
-
-# Save your key
 export BOOSTEDTRAVEL_API_KEY=trav_...
 
-# Search flights
 boostedtravel search LHR JFK 2026-04-15
-
-# Round trip with options
 boostedtravel search LON BCN 2026-04-01 --return 2026-04-08 --cabin M --sort price
-
-# Multi-passenger: 2 adults + 1 child
-boostedtravel search GDN BER 2026-05-10 --adults 2 --children 1
-
-# Business class, 3 adults, sorted by duration
-boostedtravel search LHR SIN 2026-06-01 --adults 3 --cabin C --sort duration
-
-# Resolve a city to IATA codes
-boostedtravel locations "New York"
-
-# Unlock an offer ($1)
 boostedtravel unlock off_xxx
-
-# Book the flight
 boostedtravel book off_xxx \
   --passenger '{"id":"pas_0","given_name":"John","family_name":"Doe","born_on":"1990-01-15","gender":"m","title":"mr"}' \
   --email john.doe@example.com
-
-# Check your profile & usage
-boostedtravel me
 ```
 
-All commands support `--json` for machine-readable output (perfect for agent pipelines):
+All commands support `--json` for machine-readable output:
 
 ```bash
 boostedtravel search GDN BER 2026-03-03 --json | jq '.offers[0]'
 ```
 
-### CLI (JavaScript/TypeScript)
+## Install
+
+### Python (recommended)
+
+```bash
+pip install boostedtravel
+```
+
+### JavaScript / TypeScript
 
 ```bash
 npm install -g boostedtravel
 ```
 
-Same commands, same interface:
-
-```bash
-boostedtravel search LHR JFK 2026-04-15 --json
-boostedtravel unlock off_xxx
-boostedtravel book off_xxx --passenger '...' --email john@example.com
-```
-
-### SDK (Python)
+### Python SDK
 
 ```python
 from boostedtravel import BoostedTravel
@@ -101,10 +64,7 @@ bt = BoostedTravel(api_key="trav_...")
 flights = bt.search("LHR", "JFK", "2026-04-15")
 print(f"{flights.total_results} offers, cheapest: {flights.cheapest.summary()}")
 
-# Unlock
 unlocked = bt.unlock(flights.offers[0].id)
-
-# Book
 booking = bt.book(
     offer_id=unlocked.offer_id,
     passengers=[{"id": "pas_0", "given_name": "John", "family_name": "Doe", "born_on": "1990-01-15", "gender": "m", "title": "mr"}],
@@ -113,7 +73,7 @@ booking = bt.book(
 print(f"Booked! PNR: {booking.booking_reference}")
 ```
 
-### SDK (JavaScript / TypeScript)
+### JS SDK
 
 ```typescript
 import { BoostedTravel } from 'boostedtravel';
@@ -125,13 +85,9 @@ console.log(`${flights.totalResults} offers`);
 
 ### MCP Server (Claude Desktop / Cursor / Windsurf)
 
-For AI agents using Model Context Protocol:
-
 ```bash
 npx boostedtravel-mcp
 ```
-
-Add to your MCP config:
 
 ```json
 {
@@ -161,823 +117,20 @@ Add to your MCP config:
 
 All commands accept `--json` for structured output and `--api-key` to override the env variable.
 
-### Search Flags
+## How It Works
 
-| Flag | Short | Default | Description |
-|------|-------|---------|-------------|
-| `--return` | `-r` | _(one-way)_ | Return date for round-trip (YYYY-MM-DD) |
-| `--adults` | `-a` | `1` | Number of adult passengers (1–9) |
-| `--children` | | `0` | Number of children (2–11 years) |
-| `--cabin` | `-c` | _(any)_ | Cabin class (see below) |
-| `--max-stops` | `-s` | `2` | Maximum stopovers per direction (0–4) |
-| `--currency` | | `EUR` | 3-letter currency code |
-| `--limit` | `-l` | `20` | Maximum number of results (1–100) |
-| `--sort` | | `price` | Sort by `price` or `duration` |
-| `--json` | `-j` | | Output raw JSON (for agents/scripts) |
-
-### Multi-Passenger Examples
-
-```bash
-# Family trip: 2 adults + 2 children, economy
-boostedtravel search LHR BCN 2026-07-15 --return 2026-07-22 --adults 2 --children 2 --cabin M
-
-# Business trip: 3 adults, business class, direct flights only
-boostedtravel search JFK LHR 2026-05-01 --adults 3 --cabin C --max-stops 0
-
-# Solo round-trip, first class, sorted by duration
-boostedtravel search LAX NRT 2026-08-10 --return 2026-08-24 --cabin F --sort duration
-```
-
-When you search with multiple passengers, the response includes `passenger_ids` (e.g., `["pas_0", "pas_1", "pas_2"]`). You must provide passenger details for **each** ID when booking.
-
-### Cabin Class Codes Explained
-
-| Code | Class | Typical Use Case |
-|------|-------|-----------------|
-| `M` | Economy | Standard seating, cheapest fares |
-| `W` | Premium Economy | Extra legroom, better meals, priority boarding |
-| `C` | Business | Lie-flat seats on long-haul, lounge access, flexible tickets |
-| `F` | First | Top-tier service, suites on some airlines, maximum comfort |
-
-If omitted, the search returns all cabin classes. Specify a cabin code to filter results to that class only.
-
-## Authentication
-
-### 1. Register (one-time, no auth needed)
-
-```bash
-# CLI
-boostedtravel register --name my-agent --email you@example.com
-
-# cURL
-curl -X POST https://api.boostedchat.com/api/v1/agents/register \
-  -H "Content-Type: application/json" \
-  -d '{"agent_name": "my-agent", "email": "you@example.com"}'
-
-# Response:
-# { "agent_id": "ag_xxx", "api_key": "trav_xxxxx...", "message": "..." }
-```
-
-### 2. Use the API Key
-
-Every authenticated request requires the `X-API-Key` header:
-
-```bash
-# Set as environment variable (recommended)
-export BOOSTEDTRAVEL_API_KEY=trav_...
-
-# CLI reads it automatically
-boostedtravel search LHR JFK 2026-04-15
-
-# Or pass explicitly
-boostedtravel search LHR JFK 2026-04-15 --api-key trav_...
-
-# cURL
-curl -X POST https://api.boostedchat.com/api/v1/flights/search \
-  -H "X-API-Key: trav_..." \
-  -H "Content-Type: application/json" \
-  -d '{"origin": "LHR", "destination": "JFK", "date_from": "2026-04-15"}'
-```
-
-### 3. Python SDK
-
-```python
-from boostedtravel import BoostedTravel
-
-# Option A: Pass directly
-bt = BoostedTravel(api_key="trav_...")
-
-# Option B: Read from environment (BOOSTEDTRAVEL_API_KEY)
-bt = BoostedTravel()
-
-# Option C: Register inline
-creds = BoostedTravel.register("my-agent", "agent@example.com")
-bt = BoostedTravel(api_key=creds["api_key"])
-```
-
-### 4. Setup Payment (required before unlock)
-
-You must attach a payment method before you can unlock offers or book flights. This is a one-time step.
-
-```bash
-# CLI — opens Stripe to attach a card
-boostedtravel setup-payment
-```
-
-```python
-# Python SDK — multiple options:
-
-# Option A: Stripe test token (for development)
-bt.setup_payment(token="tok_visa")
-
-# Option B: Stripe PaymentMethod ID (from Stripe.js or Elements)
-bt.setup_payment(payment_method_id="pm_xxx")
-
-# Option C: Raw card details (requires PCI-compliant Stripe account)
-bt.setup_payment(card_number="4242424242424242", exp_month=12, exp_year=2027, cvc="123")
-```
-
-```bash
-# cURL
-curl -X POST https://api.boostedchat.com/api/v1/agents/setup-payment \
-  -H "X-API-Key: trav_..." \
-  -H "Content-Type: application/json" \
-  -d '{"token": "tok_visa"}'
-```
-
-After setup, all charges ($1 unlock) are automatic — no further payment interaction needed.
-
-### 5. Verify Authentication Works
-
-```python
-# Check your agent profile — confirms key and payment status
-profile = bt.me()
-print(f"Agent: {profile.agent_name}")
-print(f"Payment: {profile.payment_status}")
-print(f"Searches: {profile.search_count}")
-print(f"Bookings: {profile.booking_count}")
-```
-
-```bash
-boostedtravel me
-# Agent: my-agent
-# Payment: active
-# Searches: 42
-# Bookings: 3
-```
-
-### Authentication Failure Handling
-
-```python
-from boostedtravel import BoostedTravel, AuthenticationError
-
-try:
-    bt = BoostedTravel(api_key="trav_invalid_key")
-    flights = bt.search("LHR", "JFK", "2026-04-15")
-except AuthenticationError:
-    # HTTP 401 — key is missing, invalid, or expired
-    print("Invalid API key. Register a new one:")
-    creds = BoostedTravel.register("my-agent", "agent@example.com")
-    bt = BoostedTravel(api_key=creds["api_key"])
-    # Don't forget to set up payment after re-registering
-    bt.setup_payment(token="tok_visa")
-```
+1. **Search** (free) — returns offers with full details: price, airlines, duration, stopovers, conditions
+2. **Unlock** ($1) — confirms live price with the airline, reserves for 30 minutes
+3. **Book** (free) — creates real airline PNR, e-ticket sent to passenger email
 
 ## Error Handling
 
-The SDK raises specific exceptions for each failure mode:
-
-| Exception | HTTP Code | When it happens |
-|-----------|-----------|-----------------|
+| Exception | HTTP | When |
+|-----------|------|------|
 | `AuthenticationError` | 401 | Missing or invalid API key |
-| `PaymentRequiredError` | 402 | No payment method set up (call `setup-payment` first) |
+| `PaymentRequiredError` | 402 | No payment method (call `setup-payment`) |
 | `OfferExpiredError` | 410 | Offer no longer available (search again) |
-| `BoostedTravelError` | any | Base class — catches all API errors |
-
-### Python Error Handling
-
-```python
-from boostedtravel import (
-    BoostedTravel, BoostedTravelError,
-    AuthenticationError, PaymentRequiredError, OfferExpiredError,
-)
-
-bt = BoostedTravel(api_key="trav_...")
-
-# Search — handle invalid locations
-try:
-    flights = bt.search("INVALID", "JFK", "2026-04-15")
-except BoostedTravelError as e:
-    if e.status_code == 422:
-        print(f"Invalid location: {e.message}")
-        # Resolve the location first
-        locations = bt.resolve_location("New York")
-        iata = locations[0]["iata_code"]  # "JFK"
-        flights = bt.search("LHR", iata, "2026-04-15")
-    else:
-        raise
-
-# Unlock — handle payment and expiry
-try:
-    unlocked = bt.unlock(flights.cheapest.id)
-except PaymentRequiredError:
-    print("Set up payment first: bt.setup_payment('tok_visa')")
-except OfferExpiredError:
-    print("Offer expired — search again for fresh results")
-
-# Book — handle all errors
-try:
-    booking = bt.book(
-        offer_id=unlocked.offer_id,
-        passengers=[{
-            "id": flights.passenger_ids[0],
-            "given_name": "John",
-            "family_name": "Doe",
-            "born_on": "1990-01-15",
-            "gender": "m",
-            "title": "mr",
-        }],
-        contact_email="john@example.com",
-    )
-    print(f"Booked! PNR: {booking.booking_reference}")
-except OfferExpiredError:
-    print("Offer expired after unlock — search again (30min window may have passed)")
-except BoostedTravelError as e:
-    print(f"Booking failed ({e.status_code}): {e.message}")
-```
-
-### CLI Error Handling
-
-The CLI exits with code 1 on errors and prints the message to stderr. Use `--json` for parseable error output:
-
-```bash
-# Check exit code in scripts
-if ! boostedtravel search INVALID JFK 2026-04-15 --json 2>/dev/null; then
-  echo "Search failed — check location codes"
-fi
-```
-
-## Working with Search Results
-
-Search returns offers from multiple airlines. Each offer includes price, airlines, route, duration, stopovers, and booking conditions:
-
-### Python — Filter and Sort Results
-
-```python
-flights = bt.search("LON", "BCN", "2026-04-01", return_date="2026-04-08")
-
-# Access all offers
-for offer in flights.offers:
-    print(f"{offer.owner_airline}: {offer.currency} {offer.price}")
-    print(f"  Route: {offer.outbound.route_str}")
-    print(f"  Duration: {offer.outbound.total_duration_seconds // 3600}h")
-    print(f"  Stops: {offer.outbound.stopovers}")
-    print(f"  Refundable: {offer.conditions.get('refund_before_departure', 'unknown')}")
-    print(f"  Changeable: {offer.conditions.get('change_before_departure', 'unknown')}")
-
-# Filter: only direct flights
-direct = [o for o in flights.offers if o.outbound.stopovers == 0]
-
-# Filter: only a specific airline
-ba_flights = [o for o in flights.offers if "British Airways" in o.airlines]
-
-# Filter: refundable only
-refundable = [o for o in flights.offers if o.conditions.get("refund_before_departure") == "allowed"]
-
-# Sort by duration (search already sorts by price by default)
-by_duration = sorted(flights.offers, key=lambda o: o.outbound.total_duration_seconds)
-
-# Get the cheapest
-cheapest = flights.cheapest
-print(f"Best price: {cheapest.price} {cheapest.currency} on {cheapest.owner_airline}")
-```
-
-### CLI — JSON Output for Agents
-
-```bash
-# Get structured JSON output
-boostedtravel search LON BCN 2026-04-01 --return 2026-04-08 --json
-
-# Pipe to jq for filtering
-boostedtravel search LON BCN 2026-04-01 --json | jq '[.offers[] | select(.stopovers == 0)]'
-boostedtravel search LON BCN 2026-04-01 --json | jq '.offers | sort_by(.duration_seconds) | .[0]'
-```
-
-### JSON Response Structure
-
-```json
-{
-  "passenger_ids": ["pas_0", "pas_1"],
-  "total_results": 47,
-  "offers": [
-    {
-      "id": "off_xxx",
-      "price": 89.50,
-      "currency": "EUR",
-      "airlines": ["Ryanair"],
-      "owner_airline": "Ryanair",
-      "route": "STN → BCN",
-      "duration_seconds": 7800,
-      "stopovers": 0,
-      "conditions": {
-        "refund_before_departure": "not_allowed",
-        "change_before_departure": "allowed_with_fee"
-      },
-      "is_locked": false
-    }
-  ]
-}
-```
-
-## Resolve Locations Before Searching
-
-Always resolve city names to IATA codes before searching. This avoids errors from invalid or ambiguous location names:
-
-```python
-# Resolve a city name
-locations = bt.resolve_location("New York")
-# Returns: [{"iata_code": "JFK", "name": "John F. Kennedy", "type": "airport", "city": "New York"}, ...]
-
-# Use the IATA code in search
-flights = bt.search(locations[0]["iata_code"], "LAX", "2026-04-15")
-```
-
-```bash
-# CLI
-boostedtravel locations "New York"
-# Output:
-#   JFK  John F. Kennedy International Airport
-#   LGA  LaGuardia Airport
-#   EWR  Newark Liberty International Airport
-#   NYC  New York (all airports)
-```
-
-### Handling Ambiguous Locations
-
-When a city has multiple airports, you have two strategies:
-
-```python
-locations = bt.resolve_location("London")
-# Returns: LHR, LGW, STN, LTN, LCY, LON
-
-# Strategy 1: Use the CITY code (searches ALL airports in that city)
-flights = bt.search("LON", "BCN", "2026-04-01")  # all London airports
-
-# Strategy 2: Use a specific AIRPORT code (only that airport)
-flights = bt.search("LHR", "BCN", "2026-04-01")  # Heathrow only
-
-# Strategy 3: Search multiple airports and compare (free!)
-for loc in locations:
-    if loc["type"] == "airport":
-        result = bt.search(loc["iata_code"], "BCN", "2026-04-01")
-        if result.offers:
-            print(f"{loc['name']} ({loc['iata_code']}): cheapest {result.cheapest.price} {result.cheapest.currency}")
-```
-
-**Rule of thumb:** Use the city code (3-letter, e.g. `LON`, `NYC`, `PAR`) when you want the broadest search across all airports. Use a specific airport code when the user has a preference.
-
-## Complete Search-to-Booking Workflow
-
-Here's a complete, production-ready workflow with proper error handling at each step:
-
-### Python — Full Workflow
-
-```python
-from boostedtravel import (
-    BoostedTravel, BoostedTravelError,
-    AuthenticationError, PaymentRequiredError, OfferExpiredError,
-)
-
-def search_and_book(origin_city, dest_city, date, passenger_info, email):
-    bt = BoostedTravel()  # reads BOOSTEDTRAVEL_API_KEY from env
-
-    # Step 1: Resolve locations
-    origins = bt.resolve_location(origin_city)
-    dests = bt.resolve_location(dest_city)
-    if not origins or not dests:
-        raise ValueError(f"Could not resolve: {origin_city} or {dest_city}")
-    origin_iata = origins[0]["iata_code"]
-    dest_iata = dests[0]["iata_code"]
-
-    # Step 2: Search (free)
-    flights = bt.search(origin_iata, dest_iata, date, sort="price")
-    if not flights.offers:
-        print(f"No flights found {origin_iata} → {dest_iata} on {date}")
-        return None
-
-    print(f"Found {flights.total_results} offers")
-    print(f"Cheapest: {flights.cheapest.price} {flights.cheapest.currency}")
-    print(f"Passenger IDs: {flights.passenger_ids}")
-
-    # Step 3: Unlock ($1) — confirms price, reserves 30min
-    try:
-        unlocked = bt.unlock(flights.cheapest.id)
-        print(f"Confirmed price: {unlocked.confirmed_currency} {unlocked.confirmed_price}")
-    except PaymentRequiredError:
-        print("Setup payment first: boostedtravel setup-payment")
-        return None
-    except OfferExpiredError:
-        print("Offer expired — search again")
-        return None
-
-    # Step 4: Book (free after unlock)
-    # Map passenger_info to each passenger_id from search
-    passengers = []
-    for i, pid in enumerate(flights.passenger_ids):
-        pax = {**passenger_info[i], "id": pid}
-        passengers.append(pax)
-
-    try:
-        booking = bt.book(
-            offer_id=unlocked.offer_id,
-            passengers=passengers,
-            contact_email=email,
-        )
-        print(f"Booked! PNR: {booking.booking_reference}")
-        return booking
-    except OfferExpiredError:
-        print("Offer expired — 30min window may have passed, search again")
-        return None
-    except BoostedTravelError as e:
-        print(f"Booking failed: {e.message}")
-        return None
-
-
-# Usage — 2 passengers
-search_and_book(
-    origin_city="London",
-    dest_city="Barcelona",
-    date="2026-04-01",
-    passenger_info=[
-        {"given_name": "John", "family_name": "Doe", "born_on": "1990-01-15", "gender": "m", "title": "mr"},
-        {"given_name": "Jane", "family_name": "Doe", "born_on": "1992-03-20", "gender": "f", "title": "ms"},
-    ],
-    email="john.doe@example.com",
-)
-```
-
-### Bash — CLI Workflow
-
-```bash
-#!/bin/bash
-set -euo pipefail
-export BOOSTEDTRAVEL_API_KEY=trav_...
-
-# Step 1: Resolve locations
-ORIGIN=$(boostedtravel locations "London" --json | jq -r '.[0].iata_code')
-DEST=$(boostedtravel locations "Barcelona" --json | jq -r '.[0].iata_code')
-
-if [ -z "$ORIGIN" ] || [ -z "$DEST" ]; then
-  echo "Error: Could not resolve locations" >&2
-  exit 1
-fi
-
-# Step 2: Search
-RESULTS=$(boostedtravel search "$ORIGIN" "$DEST" 2026-04-01 --adults 2 --json)
-OFFER_ID=$(echo "$RESULTS" | jq -r '.offers[0].id')
-TOTAL=$(echo "$RESULTS" | jq '.total_results')
-
-if [ "$OFFER_ID" = "null" ] || [ -z "$OFFER_ID" ]; then
-  echo "No flights found $ORIGIN → $DEST" >&2
-  exit 1
-fi
-
-echo "Found $TOTAL offers, best: $OFFER_ID"
-
-# Step 3: Unlock
-if ! boostedtravel unlock "$OFFER_ID" --json > /dev/null 2>&1; then
-  echo "Unlock failed — check payment setup" >&2
-  exit 1
-fi
-
-# Step 4: Book (one --passenger per passenger_id)
-boostedtravel book "$OFFER_ID" \
-  --passenger '{"id":"pas_0","given_name":"John","family_name":"Doe","born_on":"1990-01-15","gender":"m","title":"mr"}' \
-  --passenger '{"id":"pas_1","given_name":"Jane","family_name":"Doe","born_on":"1992-03-20","gender":"f","title":"ms"}' \
-  --email john.doe@example.com
-```
-
-## Minimizing Unlock Costs (Price Aggregation Strategy)
-
-Searching is **completely free** — you can search as many routes, dates, and configurations as you want without cost. The $1 unlock fee is only charged when you confirm a specific offer. Here's how to minimize costs:
-
-### Strategy 1: Search Wide, Unlock Narrow
-
-```python
-# Search multiple dates — FREE
-dates = ["2026-04-01", "2026-04-02", "2026-04-03", "2026-04-04", "2026-04-05"]
-all_offers = []
-for date in dates:
-    result = bt.search("LON", "BCN", date)
-    all_offers.extend([(date, o) for o in result.offers])
-
-# Compare across all dates — still FREE
-all_offers.sort(key=lambda x: x[1].price)
-best_date, best_offer = all_offers[0]
-print(f"Cheapest is {best_offer.price} {best_offer.currency} on {best_date}")
-
-# Only unlock the winner — $1
-unlocked = bt.unlock(best_offer.id)
-```
-
-### Strategy 2: Filter Before Unlocking
-
-```python
-# Search returns full details (airline, duration, conditions) for FREE
-flights = bt.search("LHR", "JFK", "2026-06-01", limit=50)
-
-# Apply all filters BEFORE paying $1
-candidates = [
-    o for o in flights.offers
-    if o.outbound.stopovers == 0                          # Direct only
-    and o.outbound.total_duration_seconds < 10 * 3600     # Under 10 hours
-    and "British Airways" in o.airlines                    # Specific airline
-    and o.conditions.get("change_before_departure") != "not_allowed"  # Changeable
-]
-
-if candidates:
-    # Unlock only the best match
-    best = min(candidates, key=lambda o: o.price)
-    unlocked = bt.unlock(best.id)
-```
-
-### Strategy 3: Use the 30-Minute Window
-
-After unlocking, the confirmed price is held for **30 minutes**. Use this window to:
-- Present results to the user for decision
-- Verify passenger details
-- Complete the booking without re-searching
-
-```python
-# Unlock at minute 0
-unlocked = bt.unlock(offer_id)
-# ... user reviews details, confirms passenger info ...
-# Book within 30 minutes — no additional search or unlock needed
-booking = bt.book(offer_id=unlocked.offer_id, passengers=[...], contact_email="...")
-```
-
-### Key Rules for Cost Management
-
-| Action | Cost | Notes |
-|--------|------|-------|
-| Search | FREE | Unlimited. Search as many routes/dates as you want |
-| Resolve location | FREE | Unlimited |
-| View offer details | FREE | All details (price, airline, duration, conditions) returned in search |
-| Unlock | $1 | Confirms price, holds for 30 minutes |
-| Book | FREE | After unlock — creates real airline PNR |
-| Re-search same route | FREE | Prices may change (real-time airline data) |
-
-## How Unlock Works
-
-Unlocking is the only paid step ($1). It serves as proof of booking intent and confirms the live price with the airline.
-
-### Endpoint
-
-```
-POST /api/v1/bookings/unlock
-```
-
-### What Happens When You Unlock
-
-1. BoostedTravel sends the `offer_id` to the airline's NDC/GDS system
-2. The airline confirms the **current live price** (may differ slightly from search)
-3. A $1.00 charge is made via Stripe to your saved payment method
-4. The offer is **reserved for 30 minutes** — no one else can book it
-5. You receive `confirmed_price`, `confirmed_currency`, and `offer_expires_at`
-
-### Python Example
-
-```python
-from boostedtravel import BoostedTravel, PaymentRequiredError, OfferExpiredError
-
-bt = BoostedTravel()  # reads BOOSTEDTRAVEL_API_KEY
-
-# Search first (free)
-flights = bt.search("LHR", "JFK", "2026-06-01")
-print(f"Search price: {flights.cheapest.price} {flights.cheapest.currency}")
-
-# Unlock ($1) — confirms live price
-try:
-    unlocked = bt.unlock(flights.cheapest.id)
-    print(f"Confirmed price: {unlocked.confirmed_price} {unlocked.confirmed_currency}")
-    print(f"Expires at: {unlocked.offer_expires_at}")
-    # Price may differ from search — airline prices change in real-time
-except PaymentRequiredError:
-    print("No payment method — run: boostedtravel setup-payment")
-except OfferExpiredError:
-    print("Offer no longer available — search again for fresh results")
-```
-
-### CLI Example
-
-```bash
-# Unlock an offer
-boostedtravel unlock off_xxx
-
-# Output:
-# Confirmed price: EUR 189.50
-# Expires at: 2026-06-01T15:30:00Z (30 minutes)
-# Offer ID: off_xxx — ready to book
-```
-
-### cURL Example
-
-```bash
-curl -X POST https://api.boostedchat.com/api/v1/bookings/unlock \
-  -H "X-API-Key: trav_..." \
-  -H "Content-Type: application/json" \
-  -d '{"offer_id": "off_xxx"}'
-
-# Response:
-# {
-#   "offer_id": "off_xxx",
-#   "confirmed_price": 189.50,
-#   "confirmed_currency": "EUR",
-#   "offer_expires_at": "2026-06-01T15:30:00Z",
-#   "payment_status": "charged",
-#   "charge_amount": 1.00,
-#   "charge_currency": "USD"
-# }
-```
-
-### Important Notes
-
-- **Payment method required.** You must call `setup-payment` before your first unlock. If payment is not set up, unlock returns HTTP 402 (`PaymentRequiredError`).
-- **$1 per unlock.** Each unlock costs $1 regardless of flight price. This is the only fee.
-- **30-minute window.** After unlock, you have 30 minutes to call `book`. If the window expires, you must search again (free) and unlock again ($1).
-- **Price confirmation.** The `confirmed_price` may differ from the search price because airline prices change in real-time. Always check `confirmed_price` before booking.
-- **Offer expired (HTTP 410).** If the airline has already sold the seats, unlock returns `OfferExpiredError`. Search again for fresh offers.
-- **No refund on expired unlock.** If you unlock but don't book within 30 minutes, the $1 is not refunded. Plan your workflow to book promptly after unlock.
-
-## Building an AI Agent with BoostedTravel
-
-Guidelines for building autonomous AI agents that search, evaluate, and book flights:
-
-### Architecture
-
-```
-User request → Agent parses intent → Resolve locations → Search (free)
-  → Filter & rank offers → Present to user → Unlock best ($1) → Book (free)
-```
-
-### Agent Best Practices
-
-1. **Always resolve locations first.** City names are ambiguous — "London" could be LHR, LGW, STN, LCY, or LTN. Use `resolve_location()` to get IATA codes, then let the user confirm if multiple options exist.
-
-2. **Search is free — use it liberally.** Search multiple dates, multiple origin/destination pairs, different cabin classes. Build a complete picture before spending $1 on unlock.
-
-3. **Understand the 30-minute expiration.** After unlocking, you have 30 minutes to book. If the window expires, you must search again (free) and unlock again ($1). Plan your workflow to minimize the gap between unlock and book.
-
-4. **Handle price changes gracefully.** Search prices are real-time snapshots. The unlock step confirms the actual current price with the airline. If the confirmed price differs significantly from the search price, inform the user before proceeding to book.
-
-5. **Map passenger IDs correctly.** Search returns `passenger_ids` (e.g., `["pas_0", "pas_1"]`). When booking with multiple passengers, each passenger dict must include the correct `id` from this list. The first adult gets `pas_0`, second gets `pas_1`, etc.
-
-6. **Use REAL passenger details.** Airlines send e-tickets to the contact email. Names must match the passenger's passport or government ID. Never use placeholder data.
-
-### Handling Edge Cases
-
-```python
-from boostedtravel import (
-    BoostedTravel, BoostedTravelError,
-    PaymentRequiredError, OfferExpiredError,
-)
-
-# Retry on expired offers
-def resilient_book(bt, origin, dest, date, passengers, email, max_retries=2):
-    for attempt in range(max_retries + 1):
-        flights = bt.search(origin, dest, date)
-        if not flights.offers:
-            return None
-
-        try:
-            unlocked = bt.unlock(flights.cheapest.id)
-            booking = bt.book(
-                offer_id=unlocked.offer_id,
-                passengers=[{**p, "id": pid} for p, pid in zip(passengers, flights.passenger_ids)],
-                contact_email=email,
-            )
-            return booking
-        except OfferExpiredError:
-            if attempt < max_retries:
-                print(f"Offer expired, retrying ({attempt + 1}/{max_retries})...")
-                continue
-            raise
-        except PaymentRequiredError:
-            print("Payment method not set up — call bt.setup_payment()")
-            raise
-
-# Compare prices across dates intelligently
-def find_cheapest_date(bt, origin, dest, dates):
-    """Search multiple dates (free) and return the cheapest option."""
-    best = None
-    for date in dates:
-        try:
-            result = bt.search(origin, dest, date)
-            if result.offers and (best is None or result.cheapest.price < best[1].price):
-                best = (date, result.cheapest, result.passenger_ids)
-        except BoostedTravelError:
-            continue  # Skip dates with no routes
-    return best  # (date, offer, passenger_ids) or None
-```
-
-### Rate Limits and Timeouts
-
-The API has generous rate limits. Search is unlimited and free, so you can make many requests without cost. For production agents:
-
-| Endpoint | Rate Limit | Timeout |
-|----------|-----------|---------|
-| Search | 60 req/min per agent | 30s (airline APIs can be slow) |
-| Resolve location | 120 req/min per agent | 5s |
-| Unlock | 20 req/min per agent | 15s |
-| Book | 10 req/min per agent | 30s |
-
-Handle rate limits and timeouts in production:
-
-```python
-import time
-from boostedtravel import BoostedTravel, BoostedTravelError
-
-bt = BoostedTravel()
-
-def search_with_retry(origin, dest, date, max_retries=3):
-    """Retry with exponential backoff on rate limit or timeout."""
-    for attempt in range(max_retries):
-        try:
-            return bt.search(origin, dest, date)
-        except BoostedTravelError as e:
-            if "rate limit" in str(e).lower() or "429" in str(e):
-                wait = 2 ** attempt  # 1s, 2s, 4s
-                print(f"Rate limited, waiting {wait}s...")
-                time.sleep(wait)
-            elif "timeout" in str(e).lower() or "504" in str(e):
-                print(f"Timeout, retrying ({attempt + 1}/{max_retries})...")
-                time.sleep(1)
-            else:
-                raise
-    raise BoostedTravelError("Max retries exceeded")
-```
-
-### Advanced Preference Evaluation
-
-Rather than always picking the cheapest flight, score offers by weighted criteria:
-
-```python
-def score_offer(offer, preferences=None):
-    """Score a flight offer by multiple criteria (lower = better).
-    
-    preferences: dict with weights, e.g.:
-        {"price": 0.4, "duration": 0.3, "stops": 0.2, "airline_pref": 0.1}
-    """
-    prefs = preferences or {"price": 0.4, "duration": 0.3, "stops": 0.2, "airline_pref": 0.1}
-    preferred_airlines = {"British Airways", "Delta", "United", "Lufthansa"}
-    
-    # Normalize factors (0-1 scale, lower is better)
-    price_score = offer.price / 2000        # Normalize against $2000 baseline
-    duration_hours = offer.outbound.total_duration_seconds / 3600
-    duration_score = duration_hours / 24    # Normalize against 24h baseline
-    stops_score = offer.outbound.stopovers / 3  # Normalize against 3 stops
-    airline_score = 0 if any(a in preferred_airlines for a in offer.airlines) else 1
-    
-    return (
-        prefs["price"] * price_score +
-        prefs["duration"] * duration_score +
-        prefs["stops"] * stops_score +
-        prefs["airline_pref"] * airline_score
-    )
-
-# Usage: find best offer considering multiple criteria
-flights = bt.search("LHR", "JFK", "2026-06-01", limit=50)
-best = min(flights.offers, key=lambda o: score_offer(o, {
-    "price": 0.3,      # Price matters, but not everything
-    "duration": 0.4,    # Shortest travel time is priority
-    "stops": 0.2,       # Prefer direct flights
-    "airline_pref": 0.1 # Slight preference for known airlines
-}))
-print(f"Best overall: {best.airlines[0]} ${best.price} — {best.outbound.stopovers} stops")
-```
-
-### Data Persistence for Price Aggregation
-
-For agents that track prices over time or compare across sessions:
-
-```python
-import json
-from datetime import datetime
-from pathlib import Path
-
-CACHE_FILE = Path("flight_price_history.json")
-
-def load_price_history():
-    if CACHE_FILE.exists():
-        return json.loads(CACHE_FILE.read_text())
-    return {}
-
-def save_search_result(origin, dest, date, result):
-    """Save search results for later comparison."""
-    history = load_price_history()
-    key = f"{origin}-{dest}-{date}"
-    if key not in history:
-        history[key] = []
-    history[key].append({
-        "searched_at": datetime.utcnow().isoformat(),
-        "cheapest_price": result.cheapest.price if result.offers else None,
-        "total_offers": result.total_results,
-        "airlines": list(set(a for o in result.offers[:5] for a in o.airlines)),
-    })
-    CACHE_FILE.write_text(json.dumps(history, indent=2))
-
-def get_price_trend(origin, dest, date):
-    """Check if prices are rising or falling for a route."""
-    history = load_price_history()
-    key = f"{origin}-{dest}-{date}"
-    entries = history.get(key, [])
-    if len(entries) < 2:
-        return "insufficient_data"
-    prices = [e["cheapest_price"] for e in entries if e["cheapest_price"]]
-    if prices[-1] < prices[0]:
-        return f"falling (${prices[0]} → ${prices[-1]})"
-    return f"rising (${prices[0]} → ${prices[-1]})"
-```
+| `BoostedTravelError` | any | Base class for all API errors |
 
 ## Packages
 
@@ -987,9 +140,15 @@ def get_price_trend(origin, dest, date):
 | **JS/TS SDK + CLI** | `npm install -g boostedtravel` | SDK + `boostedtravel` CLI command |
 | **MCP Server** | `npx boostedtravel-mcp` | Model Context Protocol for Claude, Cursor, etc. |
 
-## ⚠️ Important: Real Passenger Details
+## Documentation
 
-When booking, you **must** use the real passenger's email and legal name. The airline sends e-tickets directly to the email provided. Placeholder or fake data will cause booking failures or the passenger won't receive their ticket.
+| Guide | Description |
+|-------|-------------|
+| [Getting Started](docs/getting-started.md) | Authentication, payment setup, search flags, cabin classes |
+| [API Guide](docs/api-guide.md) | Error handling, search results, workflows, unlock details, location resolution |
+| [Agent Guide](docs/agent-guide.md) | AI agent architecture, preference scoring, price tracking, rate limits |
+| [AGENTS.md](AGENTS.md) | Agent-specific instructions |
+| [CLAUDE.md](CLAUDE.md) | Codebase context for Claude |
 
 ## API Docs
 
@@ -1006,15 +165,11 @@ When booking, you **must** use the real passenger's email and legal name. The ai
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on submitting issues and pull requests.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) for our security policy and how to report vulnerabilities.
-
-## For AI Agents
-
-See [AGENTS.md](AGENTS.md) for agent-specific instructions, or [CLAUDE.md](CLAUDE.md) for codebase context.
+See [SECURITY.md](SECURITY.md) for our security policy.
 
 ## License
 
