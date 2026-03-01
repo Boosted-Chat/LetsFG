@@ -11,9 +11,18 @@ theme:
   favicon: assets/favicon.png
   logo: assets/favicon.png
   palette:
-    scheme: slate
-    primary: teal
-    accent: teal
+    - scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
   font:
     text: Lexend
     code: JetBrains Mono
