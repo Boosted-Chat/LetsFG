@@ -71,12 +71,13 @@
 
 /* Site title — lighter weight, keep flex-grow for absolute-positioned children */
 .md-header__title {
-  font-weight: 300;
+  font-weight: 200 !important;
   letter-spacing: .3px;
   color: rgba(255,255,255,0.88);
+  margin-left: -.3rem !important;
 }
 .md-header__topic {
-  font-weight: 300;
+  font-weight: 200 !important;
 }
 
 /* Logo in header */
@@ -130,6 +131,7 @@
   display: inline-block !important;
   width: 1.2rem;
   height: 1.2rem;
+  margin-right: .25rem;
 }
 .md-source__icon svg {
   fill: currentColor;
