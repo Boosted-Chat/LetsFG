@@ -310,14 +310,14 @@ async function cmdMe(args: string[]) {
 const HELP = `
 BoostedTravel — Agent-native flight search & booking.
 
-Search 300+ airlines at prices $10-30 cheaper than OTAs.
-Search is FREE. Unlock: $1. Book: 2.5% fee.
+Search 400+ airlines at raw airline prices — $20-50 cheaper than OTAs.
+Search is FREE. Unlock: $1. Book: FREE after unlock.
 
 Commands:
   search <origin> <dest> <date>   Search for flights (FREE)
   locations <query>               Resolve city name to IATA codes
   unlock <offer_id>               Unlock offer ($1)
-  book <offer_id> --passenger ... Book flight (2.5% fee)
+  book <offer_id> --passenger ... Book flight (FREE after unlock)
   register --name ... --email ... Register new agent
   setup-payment                   Set up payment card
   me                              Show agent profile

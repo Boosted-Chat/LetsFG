@@ -257,7 +257,7 @@ export class BoostedTravel {
   }
 
   /**
-   * Book a flight — 2.5% service fee.
+   * Book a flight — FREE after unlock.
    * Creates a real airline reservation with PNR.
    */
   async book(

@@ -14,7 +14,7 @@ Zero-config, zero-browser, zero-markup. Built for autonomous agents.
     # Unlock ($1)
     unlock = bt.unlock(flights.cheapest.id)
     
-    # Book (2.5% fee)
+    # Book (FREE after unlock)
     booking = bt.book(
         offer_id=flights.cheapest.id,
         passengers=[{
@@ -83,7 +83,7 @@ class BoostedTravel:
     Pricing:
       - Search: FREE (unlimited)
       - Unlock: $1 per offer (confirms price, reserves 30min)
-      - Book: 2.5% service fee (creates real airline reservation)
+      - Book: FREE after unlock (creates real airline reservation)
     """
 
     def __init__(

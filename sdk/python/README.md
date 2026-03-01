@@ -1,6 +1,6 @@
 # BoostedTravel — Agent-Native Flight Search & Booking
 
-Search 300+ airlines at prices **$10-30 cheaper** than booking.com, Kayak, and other OTAs. Zero browser, zero markup, zero config. Built for autonomous AI agents.
+Search 400+ airlines at raw airline prices — **$20-50 cheaper** than Booking.com, Kayak, and other OTAs. Zero browser, zero markup, zero config. Built for autonomous AI agents.
 
 ## Install
 
@@ -29,7 +29,7 @@ print(f"{flights.total_results} offers, cheapest: {flights.cheapest.summary()}")
 unlock = bt.unlock(flights.cheapest.id)
 print(f"Confirmed price: {unlock.confirmed_currency} {unlock.confirmed_price}")
 
-# Book — 2.5% fee
+# Book — FREE after unlock
 booking = bt.book(
     offer_id=flights.cheapest.id,
     passengers=[{
@@ -76,7 +76,7 @@ boostedtravel locations "Berlin"
 | `search` | Search flights between any two airports | FREE |
 | `locations` | Resolve city name to IATA codes | FREE |
 | `unlock` | Unlock offer (confirms price, reserves 30min) | $1 |
-| `book` | Book flight (creates real airline PNR) | 2.5% |
+| `book` | Book flight (creates real airline PNR) | FREE |
 | `register` | Register new agent, get API key | FREE |
 | `setup-payment` | Attach payment card (payment token) | FREE |
 | `me` | Show agent profile and usage stats | FREE |
@@ -92,9 +92,9 @@ Every command supports `--json` for machine-readable output.
 
 ## How It Works
 
-1. **Search** — Free, unlimited. Returns real-time offers from 300+ airlines via NDC/GDS.
+1. **Search** — Free, unlimited. Returns real-time offers from 400+ airlines via NDC/GDS.
 2. **Unlock** — $1 proof-of-intent. Confirms latest price with airline, reserves offer for 30 minutes.
-3. **Book** — 2.5% service fee. Creates real airline reservation with PNR code.
+3. **Book** — FREE after unlock. Creates real airline reservation with PNR code.
 
 Prices are cheaper because we connect directly to airlines — no OTA markup.
 

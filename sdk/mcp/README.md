@@ -52,10 +52,10 @@ Add to `.cursor/mcp.json`:
 
 | Tool | Description | Cost |
 |------|-------------|------|
-| `search_flights` | Search 300+ airlines worldwide | FREE |
+| `search_flights` | Search 400+ airlines worldwide | FREE |
 | `resolve_location` | City name → IATA code | FREE |
 | `unlock_flight_offer` | Confirm price, reserve 30min | $1 |
-| `book_flight` | Create real airline reservation | 2.5% |
+| `book_flight` | Create real airline reservation | FREE |
 | `setup_payment` | Attach payment card (once) | FREE |
 | `get_agent_profile` | Usage stats & payment status | FREE |
 

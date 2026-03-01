@@ -33,8 +33,8 @@ app = typer.Typer(
     name="boostedtravel",
     help=(
         "BoostedTravel — Agent-native flight search & booking.\n\n"
-        "Search 300+ airlines at prices $10-30 cheaper than OTAs.\n"
-        "Search is FREE. Unlock: $1. Book: 2.5% fee.\n\n"
+        "Search 400+ airlines at raw airline prices — $20-50 cheaper than OTAs.\n"
+        "Search is FREE. Unlock: $1. Book: FREE after unlock.\n\n"
         "Set BOOSTEDTRAVEL_API_KEY or use --api-key."
     ),
     no_args_is_help=True,
@@ -218,7 +218,7 @@ def book(
     api_key: Optional[str] = typer.Option(None, "--api-key", "-k", envvar="BOOSTEDTRAVEL_API_KEY"),
     base_url: Optional[str] = typer.Option(None, "--base-url", envvar="BOOSTEDTRAVEL_BASE_URL"),
 ):
-    """Book a flight — 2.5% service fee. Creates real airline reservation."""
+    """Book a flight — FREE after unlock. Creates real airline reservation."""
     bt = _get_client(api_key, base_url)
 
     passengers = []

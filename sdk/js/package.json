@@ -1,7 +1,7 @@
 {
   "name": "boostedtravel",
   "version": "0.1.0",
-  "description": "Agent-native flight search & booking. 300+ airlines, cheaper than OTAs. Built for autonomous AI agents.",
+  "description": "Agent-native flight search & booking. 400+ airlines, cheaper than OTAs. Built for autonomous AI agents.",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",

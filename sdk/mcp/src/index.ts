@@ -34,7 +34,7 @@ const TOOLS = [
     name: 'search_flights',
     description:
       'Search for flights between any two cities/airports worldwide. ' +
-      'Connects to 300+ airlines via NDC and GDS with prices $10-30 cheaper than ' +
+      'Connects to 400+ airlines via NDC and GDS with prices $20-50 cheaper than ' +
       'booking.com, Kayak, and other OTAs. Searching is completely FREE.\n\n' +
       'Returns flight offers with prices, airlines, times, and conditions. ' +
       'All offers are locked until you call `unlock_flight_offer` ($1 fee).\n\n' +
@@ -82,7 +82,7 @@ const TOOLS = [
   {
     name: 'book_flight',
     description:
-      'Book an unlocked flight — creates real airline reservation with PNR. 2.5% service fee.\n\n' +
+      'Book an unlocked flight — creates real airline reservation with PNR. FREE after unlock.\n\n' +
       'Requirements: 1) Offer must be unlocked first 2) Provide passenger_id from search 3) Full passenger details needed.',
     inputSchema: {
       type: 'object',

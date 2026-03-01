@@ -1,6 +1,6 @@
 # BoostedTravel — Agent-Native Flight Search & Booking (Node.js)
 
-Search 300+ airlines at prices **$10-30 cheaper** than booking.com, Kayak, and other OTAs. Zero dependencies. Built for autonomous AI agents.
+Search 400+ airlines at raw airline prices — **$20-50 cheaper** than Booking.com, Kayak, and other OTAs. Zero dependencies. Built for autonomous AI agents.
 
 ## Install
 
@@ -28,7 +28,7 @@ console.log(offerSummary(best));
 // Unlock — $1
 const unlock = await bt.unlock(best.id);
 
-// Book — 2.5% fee
+// Book — FREE after unlock
 const booking = await bt.book(
   best.id,
   [{
