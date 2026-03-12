@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "boostedtravel"
-version = "0.2.0"
+version = "0.2.1"
 description = "Agent-native flight search & booking. 400+ airlines, 48 direct LCC scrapers run locally. Built for autonomous AI agents."
 readme = "README.md"
 license = {text = "MIT"}
