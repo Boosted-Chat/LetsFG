@@ -1,18 +1,23 @@
 """
-Transavia Playwright scraper — navigates to Transavia booking page and searches flights.
-
-The direct API is behind WAF — requires browser session with cf_clearance cookie.
+Transavia hybrid scraper — cookie-farm + curl_cffi direct API.
 
 Transavia operates as HV (Transavia Netherlands) and TO (Transavia France).
 
-Strategy:
-1. Navigate to transavia.com/en-EU/home/ to get cf_clearance cookie
-2. Accept cookie banner
-3. Navigate to booking page /book/en-eu/search-a-flight
-4. Fill search form (one-way, From, To, date) using ID-based selectors
-5. Click "Search" → page processes internally (SPA, URL stays same)
-6. Call /start/api/flight-availability?type=full&update=false via in-page fetch
-7. Parse outboundFlight.timeSlots → FlightOffers
+The flight-availability API (/start/api/flight-availability) is behind Cloudflare
+WAF — requires valid cf_clearance cookie from a browser session.
+
+Strategy (hybrid cookie-farm):
+1. ONCE per ~25 min: Playwright opens homepage, accepts cookie banner, navigates to
+   booking page. This generates valid Cloudflare cookies (cf_clearance, __cf_bm).
+   Extract all cookies via context.cookies().
+2. For each search: curl_cffi uses farmed cookies to:
+   a) GET /book/en-eu/search-a-flight?ds=ORIGIN&as=DEST&... (initialize session)
+   b) GET /start/api/flight-availability?type=full&update=false (fetch results)
+3. Parse outboundFlight.timeSlots → FlightOffers
+
+Result: ~1-3s per search instead of ~8-15s with full Playwright.
+
+Fallback: Full Playwright browser flow if API fails (existing code).
 
 Transavia booking page form (verified Mar 2026):
   - #one-way radio → selects one-way trip
@@ -30,13 +35,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import os
 import random
 import re
-import subprocess
 import time
 from datetime import datetime
 from typing import Any, Optional
+
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CURL = True
+except ImportError:
+    HAS_CURL = False
 
 from models.flights import (
     FlightOffer,
@@ -48,6 +57,7 @@ from models.flights import (
 
 logger = logging.getLogger(__name__)
 
+# ── Anti-fingerprint pools ─────────────────────────────────────────────────
 _VIEWPORTS = [
     {"width": 1366, "height": 768},
     {"width": 1440, "height": 900},
@@ -57,9 +67,20 @@ _VIEWPORTS = [
 _LOCALES = ["en-GB", "en-US", "en-NL"]
 _TIMEZONES = ["Europe/London", "Europe/Amsterdam", "Europe/Paris", "Europe/Berlin"]
 
-# ── Shared browser singleton via CDP ────────────────────────────────────
-_CDP_PORT = 9464
-_chrome_proc = None
+_AVAILABILITY_URL = "https://www.transavia.com/start/api/flight-availability"
+_IMPERSONATE = "chrome131"
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+_COOKIE_MAX_AGE = 25 * 60  # Re-farm cookies after 25 minutes
+
+# ── Shared cookie farm state ──────────────────────────────────────────────
+_farm_lock: Optional[asyncio.Lock] = None
+_farmed_cookies: list[dict] = []
+_farm_timestamp: float = 0.0
+
+# ── Shared browser singleton (Playwright, for cookie farming + fallback) ──
 _browser = None
 _browser_lock: Optional[asyncio.Lock] = None
 
@@ -71,37 +92,29 @@ def _get_lock() -> asyncio.Lock:
     return _browser_lock
 
 
+def _get_farm_lock() -> asyncio.Lock:
+    global _farm_lock
+    if _farm_lock is None:
+        _farm_lock = asyncio.Lock()
+    return _farm_lock
+
+
 async def _get_browser():
-    """Connect to a real Chrome instance via CDP (launched once, reused)."""
-    global _chrome_proc, _browser
+    """Shared headed Chromium for cookie farming + fallback (launched once, reused)."""
+    global _browser
     lock = _get_lock()
     async with lock:
         if _browser and _browser.is_connected():
             return _browser
-        from playwright.async_api import async_playwright
 
-        from connectors.browser import find_chrome, stealth_args, stealth_popen_kwargs
-        chrome_path = find_chrome()
-        user_data = os.path.join(os.environ.get("TEMP", "/tmp"), "chrome-cdp-transavia")
-        _chrome_proc = subprocess.Popen([
-            chrome_path,
-            f"--remote-debugging-port={_CDP_PORT}",
-            f"--user-data-dir={user_data}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-blink-features=AutomationControlled",
-            *stealth_args(),
-        ], **stealth_popen_kwargs())
-        await asyncio.sleep(1.5)
-
-        pw = await async_playwright().start()
-        _browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{_CDP_PORT}")
-        logger.info("Transavia: Connected to real Chrome via CDP (port %d)", _CDP_PORT)
+        from connectors.browser import launch_headed_browser
+        _browser = await launch_headed_browser()
+        logger.info("Transavia: browser launched for cookie farming")
         return _browser
 
 
 class TransaviaConnectorClient:
-    """Transavia Playwright scraper — homepage form search + API interception."""
+    """Transavia hybrid scraper — cookie-farm + curl_cffi direct API."""
 
     def __init__(self, timeout: float = 45.0):
         self.timeout = timeout
@@ -110,7 +123,226 @@ class TransaviaConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        """
+        Search Transavia flights via cookie-farm + curl_cffi direct API.
+
+        Fast path (~1-3s): curl_cffi with farmed cookies → GET /start/api/flight-availability.
+        Slow path (~15s): Playwright farms cookies first, then curl_cffi.
+        Fallback: Full Playwright browser flow if API fails.
+        """
         t0 = time.monotonic()
+
+        try:
+            cookies = await self._ensure_cookies()
+            if not cookies:
+                logger.warning("Transavia: cookie farm failed, falling back to Playwright")
+                return await self._playwright_fallback(req, t0)
+
+            data = await self._api_search(req, cookies)
+
+            # If search failed (expired cookies), re-farm once and retry
+            if data is None:
+                logger.info("Transavia: API search failed, re-farming cookies")
+                cookies = await self._farm_cookies()
+                if cookies:
+                    data = await self._api_search(req, cookies)
+
+            # If API still fails, fall back to full Playwright
+            if not data:
+                logger.warning("Transavia: API search returned no data, falling back to Playwright")
+                return await self._playwright_fallback(req, t0)
+
+            elapsed = time.monotonic() - t0
+            offers = self._parse_response(data, req)
+            offers.sort(key=lambda o: o.price)
+
+            logger.info(
+                "Transavia %s→%s returned %d offers in %.1fs (hybrid API)",
+                req.origin, req.destination, len(offers), elapsed,
+            )
+
+            search_hash = hashlib.md5(
+                f"transavia{req.origin}{req.destination}{req.date_from}".encode()
+            ).hexdigest()[:12]
+
+            return FlightSearchResponse(
+                search_id=f"fs_{search_hash}",
+                origin=req.origin,
+                destination=req.destination,
+                currency=offers[0].currency if offers else (req.currency or "EUR"),
+                offers=offers,
+                total_results=len(offers),
+            )
+
+        except Exception as e:
+            logger.error("Transavia hybrid error: %s", e)
+            return self._empty(req)
+
+    # ------------------------------------------------------------------
+    # Cookie farm — Playwright generates Cloudflare cookies
+    # ------------------------------------------------------------------
+
+    async def _ensure_cookies(self) -> list[dict]:
+        """Return cached cookies or farm fresh ones."""
+        global _farmed_cookies, _farm_timestamp
+        if _farmed_cookies and (time.monotonic() - _farm_timestamp) < _COOKIE_MAX_AGE:
+            return _farmed_cookies
+        return await self._farm_cookies()
+
+    async def _farm_cookies(self) -> list[dict]:
+        """Open Playwright, navigate to Transavia homepage to farm Cloudflare cookies."""
+        global _farmed_cookies, _farm_timestamp
+        lock = _get_farm_lock()
+        async with lock:
+            # Double-check after acquiring lock
+            if _farmed_cookies and (time.monotonic() - _farm_timestamp) < _COOKIE_MAX_AGE:
+                return _farmed_cookies
+
+            browser = await _get_browser()
+            context = await browser.new_context(
+                viewport=random.choice(_VIEWPORTS),
+                locale=random.choice(_LOCALES),
+                timezone_id=random.choice(_TIMEZONES),
+                service_workers="block",
+            )
+
+            try:
+                try:
+                    from playwright_stealth import stealth_async
+                    page = await context.new_page()
+                    await stealth_async(page)
+                except ImportError:
+                    page = await context.new_page()
+
+                logger.info("Transavia: farming cookies via homepage load")
+                await page.goto(
+                    "https://www.transavia.com/en-EU/home/",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                await asyncio.sleep(3.0)
+
+                # Dismiss cookie banner
+                await self._dismiss_cookies(page)
+                await asyncio.sleep(1.5)
+
+                # Navigate to booking page to warm up session cookies
+                await page.goto(
+                    "https://www.transavia.com/book/en-eu/search-a-flight",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                await asyncio.sleep(2.0)
+                await self._dismiss_cookies(page)
+
+                # Extract cookies
+                cookies = await context.cookies()
+                if cookies:
+                    _farmed_cookies = cookies
+                    _farm_timestamp = time.monotonic()
+                    logger.info("Transavia: farmed %d cookies", len(cookies))
+                    return cookies
+
+                logger.warning("Transavia: cookie farm returned no cookies")
+                return []
+
+            except Exception as e:
+                logger.error("Transavia: cookie farm error: %s", e)
+                return []
+            finally:
+                await context.close()
+
+    # ------------------------------------------------------------------
+    # Direct API via curl_cffi
+    # ------------------------------------------------------------------
+
+    async def _api_search(
+        self, req: FlightSearchRequest, cookies: list[dict],
+    ) -> Optional[dict]:
+        """GET /start/api/flight-availability via curl_cffi with farmed cookies."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._api_search_sync, req, cookies)
+
+    def _api_search_sync(
+        self, req: FlightSearchRequest, cookies: list[dict],
+    ) -> Optional[dict]:
+        """Synchronous curl_cffi: load booking page then fetch availability API."""
+        sess = cffi_requests.Session(impersonate=_IMPERSONATE)
+
+        # Load farmed cookies into session
+        for c in cookies:
+            domain = c.get("domain", "")
+            sess.cookies.set(c["name"], c["value"], domain=domain)
+
+        headers = {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-GB,en;q=0.9",
+            "User-Agent": _UA,
+            "Referer": "https://www.transavia.com/en-EU/home/",
+        }
+
+        # Step 1: Load booking page to initialize server-side search session
+        booking_url = self._build_booking_url(req)
+        try:
+            r = sess.get(booking_url, headers=headers, timeout=15)
+        except Exception as e:
+            logger.error("Transavia: booking page request failed: %s", e)
+            return None
+
+        if r.status_code != 200:
+            logger.warning("Transavia: booking page returned %d", r.status_code)
+            return None
+
+        # Step 2: Fetch flight availability from the API
+        api_headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-GB,en;q=0.9",
+            "User-Agent": _UA,
+            "Referer": booking_url,
+        }
+
+        try:
+            r = sess.get(
+                _AVAILABILITY_URL,
+                params={"type": "full", "update": "false"},
+                headers=api_headers,
+                timeout=15,
+            )
+        except Exception as e:
+            logger.error("Transavia: API request failed: %s", e)
+            return None
+
+        if r.status_code != 200:
+            logger.warning("Transavia: API returned %d", r.status_code)
+            return None
+
+        try:
+            data = r.json()
+        except Exception as e:
+            logger.warning("Transavia: API response not JSON: %s", e)
+            return None
+
+        # Validate response has flight data
+        ob = data.get("outboundFlight")
+        if ob and isinstance(ob, dict) and ob.get("timeSlots"):
+            logger.info("Transavia: API returned %d time slots", len(ob["timeSlots"]))
+            return data
+
+        # Check for legacy response formats
+        if any(data.get(k) for k in ("outboundFlights", "outbound", "flights", "availableFlights")):
+            return data
+
+        logger.warning("Transavia: API response has no flight data")
+        return None
+
+    # ------------------------------------------------------------------
+    # Playwright fallback (full browser flow, used if API fails)
+    # ------------------------------------------------------------------
+
+    async def _playwright_fallback(
+        self, req: FlightSearchRequest, t0: float,
+    ) -> FlightSearchResponse:
+        """Full Playwright browser flow as fallback."""
         browser = await _get_browser()
         context = await browser.new_context(
             viewport=random.choice(_VIEWPORTS),
@@ -120,10 +352,15 @@ class TransaviaConnectorClient:
         )
 
         try:
-            page = await context.new_page()
+            try:
+                from playwright_stealth import stealth_async
+                page = await context.new_page()
+                await stealth_async(page)
+            except ImportError:
+                page = await context.new_page()
 
             # Step 1: Homepage to get cf_clearance cookie
-            logger.info("Transavia: loading homepage for cookie warmup (%s→%s)", req.origin, req.destination)
+            logger.info("Transavia: Playwright fallback for %s→%s", req.origin, req.destination)
             await page.goto(
                 "https://www.transavia.com/en-EU/home/",
                 wait_until="domcontentloaded",
@@ -134,7 +371,7 @@ class TransaviaConnectorClient:
             await asyncio.sleep(1.0)
 
             # Step 2: Navigate to booking page
-            logger.info("Transavia: loading booking page")
+            logger.info("Transavia: loading booking page (fallback)")
             await page.goto(
                 "https://www.transavia.com/book/en-eu/search-a-flight",
                 wait_until="domcontentloaded",
@@ -158,7 +395,7 @@ class TransaviaConnectorClient:
             # Step 3: Fill form
             ok = await self._fill_search_form(page, req)
             if not ok:
-                logger.warning("Transavia: form fill failed")
+                logger.warning("Transavia: fallback form fill failed")
                 return self._empty(req)
 
             # Step 4: Click search
@@ -174,12 +411,17 @@ class TransaviaConnectorClient:
                     return self._build_response(offers, req, time.monotonic() - t0)
                 return self._empty(req)
 
+            # Also update cookie farm from this successful browser session
+            global _farmed_cookies, _farm_timestamp
+            _farmed_cookies = await context.cookies()
+            _farm_timestamp = time.monotonic()
+
             elapsed = time.monotonic() - t0
             offers = self._parse_response(data, req)
             return self._build_response(offers, req, elapsed)
 
         except Exception as e:
-            logger.error("Transavia Playwright error: %s", e)
+            logger.error("Transavia Playwright fallback error: %s", e)
             return self._empty(req)
         finally:
             await context.close()
@@ -688,11 +930,11 @@ class TransaviaConnectorClient:
 
     def _build_response(self, offers: list[FlightOffer], req: FlightSearchRequest, elapsed: float) -> FlightSearchResponse:
         offers.sort(key=lambda o: o.price)
-        logger.info("Transavia %s→%s returned %d offers in %.1fs (Playwright)", req.origin, req.destination, len(offers), elapsed)
+        logger.info("Transavia %s→%s returned %d offers in %.1fs (fallback)", req.origin, req.destination, len(offers), elapsed)
         search_hash = hashlib.md5(f"transavia{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{search_hash}", origin=req.origin, destination=req.destination,
-            currency=offers[0].currency if offers else req.currency,
+            currency=offers[0].currency if offers else (req.currency or "EUR"),
             offers=offers, total_results=len(offers),
         )
 
