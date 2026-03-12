@@ -1,15 +1,24 @@
 """
-Southwest Airlines Playwright scraper -- navigates to southwest.com and searches flights.
+Southwest Airlines hybrid scraper — curl_cffi direct API + Playwright fallback.
 
 Southwest (IATA: WN) is the largest US low-cost carrier.
-Their search API is at /api/air-booking/ endpoints, protected by heavy bot detection.
+Their search API is at /api/air-booking/ endpoints, protected by bot detection.
 
-Strategy:
-1. Navigate to southwest.com homepage
-2. Dismiss cookie consent banner ("Accept all cookies")
-3. Fill search form (origin, destination, date, one-way)
-4. Intercept /api/air-booking/ API responses
-5. Parse results -> FlightOffers
+Strategy (hybrid cookie-farm):
+1. ONCE per ~15 min: bootstrap session cookies via curl_cffi homepage visit,
+   or Playwright cookie-farm if that fails.
+2. For each search: curl_cffi POSTs to /api/air-booking/page/air/booking/shopping
+   with session cookies.  Also tries mobile endpoint as fallback.
+3. If direct API fails, falls back to full Playwright interception flow.
+
+Result: ~2-5s per search instead of ~10-30s with full Playwright.
+
+API details:
+  POST https://www.southwest.com/api/air-booking/page/air/booking/shopping
+  POST https://www.southwest.com/api/mobile-air-booking/page/air/booking/shopping
+  Body: {originationAirportCode, destinationAirportCode, departureDate, ...}
+  Response: JSON with flightShoppingPage > outboundPage > cards
+  Geo-restriction: US IPs only — proxy required for both API and browser paths
 """
 
 from __future__ import annotations
@@ -22,6 +31,8 @@ import re
 import time
 from datetime import datetime
 from typing import Any, Optional
+
+from curl_cffi import requests as cffi_requests
 
 from models.flights import (
     FlightOffer,
@@ -48,6 +59,22 @@ _TIMEZONES = [
     "America/Los_Angeles", "America/Phoenix",
 ]
 
+# -- API endpoints --
+_SEARCH_URL = "https://www.southwest.com/api/air-booking/page/air/booking/shopping"
+_MOBILE_SEARCH_URL = "https://www.southwest.com/api/mobile-air-booking/page/air/booking/shopping"
+_HOMEPAGE_URL = "https://www.southwest.com/"
+_IMPERSONATE = "chrome131"
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+_COOKIE_MAX_AGE = 15 * 60  # Re-farm cookies after 15 minutes
+
+# -- Shared cookie farm state --
+_farm_lock: Optional[asyncio.Lock] = None
+_farmed_cookies: list[dict] = []
+_farm_timestamp: float = 0.0
+
 # -- Shared browser singleton --
 _pw_instance = None
 _browser = None
@@ -61,8 +88,15 @@ def _get_lock() -> asyncio.Lock:
     return _browser_lock
 
 
+def _get_farm_lock() -> asyncio.Lock:
+    global _farm_lock
+    if _farm_lock is None:
+        _farm_lock = asyncio.Lock()
+    return _farm_lock
+
+
 async def _get_browser():
-    """Shared headed Chromium (launched once, reused across searches)."""
+    """Shared headed Chromium for cookie farming and Playwright fallback (launched once, reused)."""
     global _pw_instance, _browser
     lock = _get_lock()
     async with lock:
@@ -87,16 +121,263 @@ async def _get_browser():
 
 
 class SouthwestConnectorClient:
-    """Southwest Playwright scraper -- homepage form search + API interception."""
+    """Southwest hybrid scraper -- curl_cffi direct API + Playwright fallback."""
 
     def __init__(self, timeout: float = 45.0):
         self.timeout = timeout
 
     async def close(self):
-        pass
+        pass  # Browser and cookie farm state are shared singletons
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        """
+        Search Southwest flights via hybrid approach.
+
+        Fast path (~2-5s): curl_cffi with session cookies -> POST /api/air-booking/...
+        Slow path (~10-30s): Playwright farms cookies first, then curl_cffi retries.
+        Fallback: Full Playwright interception if API fails.
+        """
         t0 = time.monotonic()
+
+        try:
+            # -- Fast path: direct API via curl_cffi --
+            api_result = await self._search_via_api(req)
+            if api_result is not None:
+                elapsed = time.monotonic() - t0
+                offers = self._parse_response(api_result, req)
+                if offers:
+                    return self._build_response(offers, req, elapsed, method="hybrid API")
+
+            # -- API returned no usable data -- fall back to Playwright --
+            logger.info("Southwest: API path did not return offers, falling back to Playwright")
+            return await self._playwright_fallback(req, t0)
+
+        except Exception as e:
+            logger.error("Southwest hybrid error: %s", e)
+            return self._empty(req)
+
+    # ------------------------------------------------------------------
+    # Cookie management
+    # ------------------------------------------------------------------
+
+    async def _ensure_cookies(self) -> list[dict]:
+        """Return valid session cookies, bootstrapping or farming as needed."""
+        global _farmed_cookies, _farm_timestamp
+        age = time.monotonic() - _farm_timestamp
+        if _farmed_cookies and age < _COOKIE_MAX_AGE:
+            return _farmed_cookies
+        # Try lightweight bootstrap first (curl_cffi homepage visit)
+        cookies = await self._bootstrap_session()
+        if cookies:
+            return cookies
+        # Fall back to Playwright cookie farm
+        return await self._farm_cookies()
+
+    async def _bootstrap_session(self) -> list[dict]:
+        """Try to get session cookies by visiting the homepage with curl_cffi."""
+        global _farmed_cookies, _farm_timestamp
+        loop = asyncio.get_event_loop()
+        try:
+            cookies = await loop.run_in_executor(None, self._bootstrap_session_sync)
+            if cookies:
+                _farmed_cookies = cookies
+                _farm_timestamp = time.monotonic()
+                logger.info("Southwest: bootstrapped %d cookies via curl_cffi", len(cookies))
+                return cookies
+        except Exception as e:
+            logger.debug("Southwest: curl_cffi bootstrap failed: %s", e)
+        return []
+
+    @staticmethod
+    def _bootstrap_session_sync() -> list[dict]:
+        """Synchronous: visit southwest.com homepage to capture session cookies."""
+        sess = cffi_requests.Session(impersonate=_IMPERSONATE)
+        try:
+            r = sess.get(
+                _HOMEPAGE_URL,
+                headers={
+                    "User-Agent": _UA,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+                timeout=15,
+                allow_redirects=True,
+            )
+            if r.status_code == 200:
+                cookies = []
+                for name, value in sess.cookies.items():
+                    cookies.append({"name": name, "value": value, "domain": ".southwest.com"})
+                if cookies:
+                    return cookies
+        except Exception as e:
+            logger.debug("Southwest: homepage fetch failed: %s", e)
+        return []
+
+    async def _farm_cookies(self) -> list[dict]:
+        """Open Playwright, load Southwest page, extract session cookies."""
+        global _farmed_cookies, _farm_timestamp
+        lock = _get_farm_lock()
+        async with lock:
+            # Double-check after acquiring lock
+            age = time.monotonic() - _farm_timestamp
+            if _farmed_cookies and age < _COOKIE_MAX_AGE:
+                return _farmed_cookies
+
+            browser = await _get_browser()
+            context = await browser.new_context(
+                viewport=random.choice(_VIEWPORTS),
+                locale=random.choice(_LOCALES),
+                timezone_id=random.choice(_TIMEZONES),
+                service_workers="block",
+            )
+
+            try:
+                try:
+                    from playwright_stealth import stealth_async
+                    page = await context.new_page()
+                    await stealth_async(page)
+                except ImportError:
+                    page = await context.new_page()
+
+                logger.info("Southwest: farming cookies via Playwright homepage visit")
+                await page.goto(
+                    "https://www.southwest.com/air/booking/",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                await asyncio.sleep(3.0)
+                await self._dismiss_cookies(page)
+                await asyncio.sleep(1.0)
+
+                cookies = await context.cookies()
+                if cookies:
+                    _farmed_cookies = cookies
+                    _farm_timestamp = time.monotonic()
+                    logger.info("Southwest: farmed %d cookies via Playwright", len(cookies))
+                    return cookies
+                return []
+
+            except Exception as e:
+                logger.error("Southwest: cookie farm error: %s", e)
+                return []
+            finally:
+                await context.close()
+
+    # ------------------------------------------------------------------
+    # Direct API via curl_cffi
+    # ------------------------------------------------------------------
+
+    async def _search_via_api(self, req: FlightSearchRequest) -> Optional[dict]:
+        """Try direct API search via curl_cffi with session cookies.
+
+        Attempts primary endpoint first, then mobile endpoint.
+        Returns parsed JSON on success, None on failure.
+        """
+        cookies = await self._ensure_cookies()
+        if not cookies:
+            logger.info("Southwest: no cookies available for API search")
+            return None
+
+        data = await self._api_search(req, cookies)
+
+        # If first attempt fails, re-farm cookies and retry once
+        if data is None:
+            logger.info("Southwest: API search failed, re-farming cookies")
+            cookies = await self._farm_cookies()
+            if cookies:
+                data = await self._api_search(req, cookies)
+
+        return data
+
+    async def _api_search(
+        self, req: FlightSearchRequest, cookies: list[dict],
+    ) -> Optional[dict]:
+        """POST to Southwest shopping API via curl_cffi with given cookies."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._api_search_sync, req, cookies)
+
+    def _api_search_sync(
+        self, req: FlightSearchRequest, cookies: list[dict],
+    ) -> Optional[dict]:
+        """Synchronous curl_cffi search -- tries primary then mobile endpoint."""
+        sess = cffi_requests.Session(impersonate=_IMPERSONATE)
+
+        # Load cookies into session
+        for c in cookies:
+            domain = c.get("domain", ".southwest.com")
+            sess.cookies.set(c["name"], c["value"], domain=domain)
+
+        dep = req.date_from.strftime("%Y-%m-%d")
+        body = {
+            "originationAirportCode": req.origin,
+            "destinationAirportCode": req.destination,
+            "departureDate": dep,
+            "departureTimeOfDay": "ALL_DAY",
+            "returnDate": "",
+            "returnTimeOfDay": "ALL_DAY",
+            "adultPassengersCount": str(req.adults),
+            "seniorPassengersCount": "0",
+            "tripType": "oneway",
+            "fareType": "USD",
+            "passengerType": "ADULT",
+            "promoCode": "",
+            "reset": "true",
+            "redirectionUrl": "",
+            "int": "HOMEQBOMAIR",
+        }
+        headers = {
+            "User-Agent": _UA,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Content-Type": "application/json",
+            "Referer": "https://www.southwest.com/air/booking/",
+            "Origin": "https://www.southwest.com",
+            "X-Api-Key": "l7xx944d175ea25f4b9c903a583ea82a1c4c",
+            "X-Channel-Id": "southwest",
+        }
+
+        # Try primary endpoint, then mobile endpoint
+        for url in [_SEARCH_URL, _MOBILE_SEARCH_URL]:
+            try:
+                r = sess.post(url, json=body, headers=headers, timeout=15)
+            except Exception as e:
+                logger.debug("Southwest: API request to %s failed: %s", url, e)
+                continue
+
+            if r.status_code != 200:
+                logger.warning("Southwest: API %s returned HTTP %d", url, r.status_code)
+                continue
+
+            try:
+                data = r.json()
+            except Exception:
+                logger.debug("Southwest: API %s returned non-JSON response", url)
+                continue
+
+            # Validate response has flight data
+            shopping = (
+                data.get("flightShoppingPage")
+                or data.get("data", {}).get("searchResults")
+            )
+            if shopping:
+                logger.info("Southwest: API %s returned valid data", url)
+                return data
+
+            # Check if it looks like a valid but empty response
+            if isinstance(data, dict) and data.get("success") is True:
+                logger.debug("Southwest: API %s returned success but no flight data", url)
+                return data
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Playwright fallback (full browser flow, used if API fails)
+    # ------------------------------------------------------------------
+
+    async def _playwright_fallback(
+        self, req: FlightSearchRequest, t0: float,
+    ) -> FlightSearchResponse:
+        """Full Playwright interception flow as fallback."""
         browser = await _get_browser()
         context = await browser.new_context(
             viewport=random.choice(_VIEWPORTS),
@@ -142,7 +423,7 @@ class SouthwestConnectorClient:
 
             page.on("response", on_response)
 
-            logger.info("Southwest: loading booking page for %s->%s", req.origin, req.destination)
+            logger.info("Southwest: Playwright fallback for %s->%s", req.origin, req.destination)
             await page.goto(
                 "https://www.southwest.com/air/booking/",
                 wait_until="domcontentloaded",
@@ -200,8 +481,13 @@ class SouthwestConnectorClient:
                 logger.warning("Southwest: timed out waiting for API response")
                 offers = await self._extract_from_dom(page, req)
                 if offers:
-                    return self._build_response(offers, req, time.monotonic() - t0)
+                    return self._build_response(offers, req, time.monotonic() - t0, method="Playwright DOM")
                 return self._empty(req)
+
+            # Also update cookie farm from this successful browser session
+            global _farmed_cookies, _farm_timestamp
+            _farmed_cookies = await context.cookies()
+            _farm_timestamp = time.monotonic()
 
             data = captured_data.get("json", {})
             if not data:
@@ -209,10 +495,10 @@ class SouthwestConnectorClient:
 
             elapsed = time.monotonic() - t0
             offers = self._parse_response(data, req)
-            return self._build_response(offers, req, elapsed)
+            return self._build_response(offers, req, elapsed, method="Playwright")
 
         except Exception as e:
-            logger.error("Southwest Playwright error: %s", e)
+            logger.error("Southwest Playwright fallback error: %s", e)
             return self._empty(req)
         finally:
             await context.close()
@@ -587,9 +873,9 @@ class SouthwestConnectorClient:
                 ))
         return segments
 
-    def _build_response(self, offers: list[FlightOffer], req: FlightSearchRequest, elapsed: float) -> FlightSearchResponse:
+    def _build_response(self, offers: list[FlightOffer], req: FlightSearchRequest, elapsed: float, method: str = "Playwright") -> FlightSearchResponse:
         offers.sort(key=lambda o: o.price)
-        logger.info("Southwest %s->%s returned %d offers in %.1fs (Playwright)", req.origin, req.destination, len(offers), elapsed)
+        logger.info("Southwest %s->%s returned %d offers in %.1fs (%s)", req.origin, req.destination, len(offers), elapsed, method)
         h = hashlib.md5(f"southwest{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
