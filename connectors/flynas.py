@@ -77,6 +77,7 @@ _akamai_cookies_ts: float = 0
 
 # Keepalive task reference
 _keepalive_task: asyncio.Task | None = None
+_keepalive_shutdown = False
 
 
 def _find_chrome() -> Optional[str]:
@@ -189,8 +190,8 @@ async def _get_browser():
         return _browser
 
 
-async def _extract_cookies_from_page(page) -> list[dict]:
-    """Extract all cookies from the warm page's browser context."""
+async def _extract_cookies_from_page(page) -> None:
+    """Extract all cookies from the warm page's browser context into the global cache."""
     global _akamai_cookies, _akamai_cookies_ts
     try:
         ctx = page.context
@@ -205,17 +206,24 @@ async def _extract_cookies_from_page(page) -> list[dict]:
                 "Flynas: cached %d cookies (Akamai keys: %s)",
                 len(cookies), ", ".join(sorted(akamai_names)) or "none",
             )
-        return cookies or []
+            if not akamai_names:
+                logger.warning("Flynas: no critical Akamai cookies found — curl_cffi path may fail")
     except Exception as e:
         logger.warning("Flynas: cookie extraction failed: %s", e)
-        return []
+
+
+def _are_cookies_fresh() -> bool:
+    """Check if cached Akamai cookies exist and are within the max age threshold."""
+    return bool(_akamai_cookies) and (time.monotonic() - _akamai_cookies_ts) < _COOKIE_MAX_AGE
 
 
 async def _keepalive_loop():
     """Periodically ping the warm page to keep Akamai cookies fresh."""
     global _warm_page, _warm_ready
-    while True:
+    while not _keepalive_shutdown:
         await asyncio.sleep(_KEEPALIVE_INTERVAL)
+        if _keepalive_shutdown:
+            break
         try:
             if not _warm_ready or not _warm_page or _warm_page.is_closed():
                 continue
@@ -231,9 +239,13 @@ async def _keepalive_loop():
 
 def _start_keepalive():
     """Start the keepalive background task if not already running."""
-    global _keepalive_task
+    global _keepalive_task, _keepalive_shutdown
+    _keepalive_shutdown = False
     if _keepalive_task is None or _keepalive_task.done():
-        _keepalive_task = asyncio.ensure_future(_keepalive_loop())
+        try:
+            _keepalive_task = asyncio.get_event_loop().create_task(_keepalive_loop())
+        except RuntimeError:
+            _keepalive_task = asyncio.ensure_future(_keepalive_loop())
 
 
 async def _ensure_warm_page():
@@ -304,12 +316,7 @@ class FlynasConnectorClient:
 
         Returns parsed JSON dict on success, None on failure (403 = Akamai block).
         """
-        if not _akamai_cookies:
-            return None
-
-        cookie_age = time.monotonic() - _akamai_cookies_ts
-        if cookie_age > _COOKIE_MAX_AGE:
-            logger.info("Flynas: Akamai cookies too old (%.0fs), skipping curl_cffi", cookie_age)
+        if not _are_cookies_fresh():
             return None
 
         loop = asyncio.get_event_loop()
@@ -318,7 +325,11 @@ class FlynasConnectorClient:
         )
 
     def _search_via_api_sync(self, search_body: dict) -> dict | None:
-        """Synchronous curl_cffi POST to /api/FlightSearch."""
+        """Synchronous curl_cffi POST to /api/FlightSearch.
+
+        Uses a shorter timeout than in-browser path since this is the fast path —
+        we want to fail quickly and fall back to the browser if needed.
+        """
         sess = cffi_requests.Session(impersonate=_IMPERSONATE)
 
         # Load all Akamai cookies into session
@@ -337,7 +348,7 @@ class FlynasConnectorClient:
                     "Origin": "https://booking.flynas.com",
                     "Referer": "https://booking.flynas.com/",
                 },
-                timeout=10,
+                timeout=min(self.timeout / 3, 10),
             )
         except Exception as e:
             logger.warning("Flynas: curl_cffi request failed: %s", e)
@@ -449,7 +460,7 @@ class FlynasConnectorClient:
         data = None
         search_path = "none"
 
-        if _akamai_cookies and (time.monotonic() - _akamai_cookies_ts) < _COOKIE_MAX_AGE:
+        if _are_cookies_fresh():
             data = await self._search_via_api(search_body)
             if data is not None:
                 search_path = "curl_cffi"
