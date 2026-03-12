@@ -129,9 +129,10 @@ async def _get_nodriver_page():
             return None
 
         try:
+            from connectors.browser import stealth_position_arg
             _nd_browser = await uc.start(
                 headless=False,
-                browser_args=["--window-size=1440,900"],
+                browser_args=["--window-size=1440,900", *stealth_position_arg()],
             )
         except Exception as e:
             logger.warning("TwayAir: nodriver start failed: %s", e)
