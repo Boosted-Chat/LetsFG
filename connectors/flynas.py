@@ -1,19 +1,23 @@
 """
-Flynas hybrid scraper — CDP Chrome + persistent page + page.evaluate(fetch).
+Flynas hybrid scraper — CDP Chrome + persistent page + curl_cffi fast path.
 
 Flynas (IATA: XY) is a Saudi low-cost carrier.
 Website: booking.flynas.com — custom booking engine protected by Akamai WAF.
 
-Strategy (CDP Chrome + in-browser fetch):
+Strategy (Enhanced Hybrid — curl_cffi fast path + CDP Chrome fallback):
 1. Launch REAL system Chrome (--remote-debugging-port, --user-data-dir).
 2. Connect via Playwright CDP. Keep ONE persistent page on booking.flynas.com.
 3. page.evaluate(fetch('/api/SessionCreate')) → establishes API session
-4. page.evaluate(fetch('/api/FlightSearch', body)) → real-time flight data
-5. Parse JSON → FlightOffer objects
+4. Extract Akamai cookies (_abck, bm_sz, ak_bmsc, session cookies) from warm page.
+5. FAST PATH: curl_cffi (impersonate="chrome131") POSTs to /api/FlightSearch
+   with extracted cookies. ~0.5-1s when cookies are fresh (<5 min).
+6. FALLBACK: page.evaluate(fetch('/api/FlightSearch', body)) if curl_cffi
+   fails (403 = Akamai blocked). ~2-4s warm.
+7. After successful in-browser search, refresh cookie cache from warm page.
 
 Real Chrome bypasses Akamai fingerprinting where bundled Chromium fails.
-Searches complete in ~0.4-0.7s after initial page load (~6-10s).
-The page is kept warm and reused across multiple searches.
+curl_cffi fast path works ~50% of the time but is 5-10x faster when it does.
+The page is kept warm with periodic pings (every 2 min) to keep Akamai fresh.
 """
 
 from __future__ import annotations
@@ -28,6 +32,8 @@ import subprocess
 import time
 from datetime import datetime
 from typing import Any, Optional
+
+from curl_cffi import requests as cffi_requests
 
 from models.flights import (
     FlightOffer,
@@ -51,6 +57,11 @@ _USER_DATA_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), ".flynas_chrome_data"
 )
 
+_IMPERSONATE = "chrome131"
+_COOKIE_MAX_AGE = 5 * 60  # Akamai _abck validity ~5-10 min; use 5 min as safe threshold
+_KEEPALIVE_INTERVAL = 2 * 60  # Ping warm page every 2 min to keep Akamai cookies fresh
+_SEARCH_URL = "https://booking.flynas.com/api/FlightSearch"
+
 _pw_instance = None
 _browser = None
 _chrome_proc = None
@@ -59,6 +70,13 @@ _browser_lock: Optional[asyncio.Lock] = None
 _warm_page = None
 _warm_page_lock: Optional[asyncio.Lock] = None
 _warm_ready = False
+
+# Akamai cookie cache — extracted from warm page after Akamai resolves
+_akamai_cookies: list[dict] | None = None
+_akamai_cookies_ts: float = 0
+
+# Keepalive task reference
+_keepalive_task: asyncio.Task | None = None
 
 
 def _find_chrome() -> Optional[str]:
@@ -171,6 +189,53 @@ async def _get_browser():
         return _browser
 
 
+async def _extract_cookies_from_page(page) -> list[dict]:
+    """Extract all cookies from the warm page's browser context."""
+    global _akamai_cookies, _akamai_cookies_ts
+    try:
+        ctx = page.context
+        cookies = await ctx.cookies()
+        if cookies:
+            _akamai_cookies = cookies
+            _akamai_cookies_ts = time.monotonic()
+            akamai_names = {c["name"] for c in cookies if c["name"] in (
+                "_abck", "bm_sz", "ak_bmsc",
+            )}
+            logger.info(
+                "Flynas: cached %d cookies (Akamai keys: %s)",
+                len(cookies), ", ".join(sorted(akamai_names)) or "none",
+            )
+        return cookies or []
+    except Exception as e:
+        logger.warning("Flynas: cookie extraction failed: %s", e)
+        return []
+
+
+async def _keepalive_loop():
+    """Periodically ping the warm page to keep Akamai cookies fresh."""
+    global _warm_page, _warm_ready
+    while True:
+        await asyncio.sleep(_KEEPALIVE_INTERVAL)
+        try:
+            if not _warm_ready or not _warm_page or _warm_page.is_closed():
+                continue
+            # Simple JS eval to keep the page connection alive
+            await _warm_page.evaluate("1")
+            # Re-extract cookies to keep the cache fresh
+            await _extract_cookies_from_page(_warm_page)
+            logger.debug("Flynas: keepalive ping OK")
+        except Exception as e:
+            logger.warning("Flynas: keepalive ping failed: %s — marking page stale", e)
+            _warm_ready = False
+
+
+def _start_keepalive():
+    """Start the keepalive background task if not already running."""
+    global _keepalive_task
+    if _keepalive_task is None or _keepalive_task.done():
+        _keepalive_task = asyncio.ensure_future(_keepalive_loop())
+
+
 async def _ensure_warm_page():
     """Ensure a warm page exists with valid Akamai session."""
     global _warm_page, _warm_ready
@@ -212,12 +277,16 @@ async def _ensure_warm_page():
         }""")
         logger.info("Flynas: SessionCreate status=%s", sess.get("status"))
 
+        # Extract Akamai cookies after warm-up
+        await _extract_cookies_from_page(_warm_page)
+
         _warm_ready = True
+        _start_keepalive()
         return _warm_page
 
 
 class FlynasConnectorClient:
-    """Flynas hybrid scraper — Playwright warm page + in-browser fetch API."""
+    """Flynas hybrid scraper — curl_cffi fast path + Playwright warm page fallback."""
 
     def __init__(self, timeout: float = 30.0):
         self.timeout = timeout
@@ -225,14 +294,134 @@ class FlynasConnectorClient:
     async def close(self):
         pass
 
-    async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
-        t0 = time.monotonic()
+    # ------------------------------------------------------------------
+    # curl_cffi fast path
+    # ------------------------------------------------------------------
+
+    async def _search_via_api(self, search_body: dict) -> dict | None:
+        """
+        POST /api/FlightSearch via curl_cffi with cached Akamai cookies.
+
+        Returns parsed JSON dict on success, None on failure (403 = Akamai block).
+        """
+        if not _akamai_cookies:
+            return None
+
+        cookie_age = time.monotonic() - _akamai_cookies_ts
+        if cookie_age > _COOKIE_MAX_AGE:
+            logger.info("Flynas: Akamai cookies too old (%.0fs), skipping curl_cffi", cookie_age)
+            return None
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self._search_via_api_sync, search_body,
+        )
+
+    def _search_via_api_sync(self, search_body: dict) -> dict | None:
+        """Synchronous curl_cffi POST to /api/FlightSearch."""
+        sess = cffi_requests.Session(impersonate=_IMPERSONATE)
+
+        # Load all Akamai cookies into session
+        for c in _akamai_cookies:
+            domain = c.get("domain", "")
+            sess.cookies.set(c["name"], c["value"], domain=domain)
 
         try:
-            page = await _ensure_warm_page()
+            r = sess.post(
+                _SEARCH_URL,
+                json=search_body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/plain, */*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Origin": "https://booking.flynas.com",
+                    "Referer": "https://booking.flynas.com/",
+                },
+                timeout=10,
+            )
         except Exception as e:
-            logger.error("Flynas: warm page setup failed: %s", e)
-            return self._empty(req)
+            logger.warning("Flynas: curl_cffi request failed: %s", e)
+            return None
+
+        if r.status_code in (403, 429):
+            logger.info("Flynas: curl_cffi blocked by Akamai (%d)", r.status_code)
+            return None
+
+        if r.status_code not in (200, 201):
+            logger.warning("Flynas: curl_cffi returned %d", r.status_code)
+            return None
+
+        try:
+            return r.json()
+        except Exception:
+            logger.warning("Flynas: curl_cffi non-JSON response")
+            return None
+
+    # ------------------------------------------------------------------
+    # In-browser fetch fallback (existing path)
+    # ------------------------------------------------------------------
+
+    async def _search_in_browser(self, page, search_body: dict) -> dict | None:
+        """Execute FlightSearch via page.evaluate(fetch(...)) — inherits Akamai cookies."""
+        global _warm_ready
+
+        try:
+            result = await page.evaluate(
+                """async (body) => {
+                    const r = await fetch('/api/FlightSearch', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(body)
+                    });
+                    return {status: r.status, body: await r.text()};
+                }""",
+                search_body,
+            )
+        except Exception as e:
+            logger.warning("Flynas: page.evaluate failed: %s — resetting warm page", e)
+            _warm_ready = False
+            return None
+
+        status = result.get("status", 0)
+
+        if status == 429:
+            logger.info("Flynas: 429 challenge, waiting 3s and retrying...")
+            await asyncio.sleep(3)
+            try:
+                result = await page.evaluate(
+                    """async (body) => {
+                        const r = await fetch('/api/FlightSearch', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(body)
+                        });
+                        return {status: r.status, body: await r.text()};
+                    }""",
+                    search_body,
+                )
+                status = result.get("status", 0)
+            except Exception:
+                _warm_ready = False
+                return None
+
+        if status not in (200, 201):
+            logger.warning("Flynas API returned %d: %s", status, result.get("body", "")[:300])
+            if status in (403, 429):
+                _warm_ready = False
+            return None
+
+        try:
+            return json.loads(result["body"])
+        except Exception:
+            logger.warning("Flynas: non-JSON response from in-browser fetch")
+            return None
+
+    # ------------------------------------------------------------------
+    # Main search — curl_cffi fast path -> in-browser fallback
+    # ------------------------------------------------------------------
+
+    async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        t0 = time.monotonic()
 
         date_str = req.date_from.strftime("%Y-%m-%d")
 
@@ -256,63 +445,41 @@ class FlynasConnectorClient:
             }
         }
 
-        # Execute FlightSearch via in-browser fetch (inherits Akamai cookies)
-        try:
-            result = await page.evaluate(
-                """async (body) => {
-                    const r = await fetch('/api/FlightSearch', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify(body)
-                    });
-                    return {status: r.status, body: await r.text()};
-                }""",
-                search_body,
-            )
-        except Exception as e:
-            logger.warning("Flynas: page.evaluate failed: %s — resetting warm page", e)
-            global _warm_ready
-            _warm_ready = False
-            return self._empty(req)
+        # ── Fast path: curl_cffi with cached Akamai cookies ───────────
+        data = None
+        search_path = "none"
 
-        status = result.get("status", 0)
-        elapsed = time.monotonic() - t0
-
-        if status == 429:
-            # Akamai challenge — wait and retry once
-            logger.info("Flynas: 429 challenge, waiting 3s and retrying...")
-            await asyncio.sleep(3)
-            try:
-                result = await page.evaluate(
-                    """async (body) => {
-                        const r = await fetch('/api/FlightSearch', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify(body)
-                        });
-                        return {status: r.status, body: await r.text()};
-                    }""",
-                    search_body,
+        if _akamai_cookies and (time.monotonic() - _akamai_cookies_ts) < _COOKIE_MAX_AGE:
+            data = await self._search_via_api(search_body)
+            if data is not None:
+                search_path = "curl_cffi"
+                logger.info(
+                    "Flynas: curl_cffi fast path succeeded for %s->%s in %.1fs",
+                    req.origin, req.destination, time.monotonic() - t0,
                 )
-                status = result.get("status", 0)
-                elapsed = time.monotonic() - t0
-            except Exception:
-                _warm_ready = False
+
+        # ── Fallback: in-browser fetch via warm page ──────────────────
+        if data is None:
+            try:
+                page = await _ensure_warm_page()
+            except Exception as e:
+                logger.error("Flynas: warm page setup failed: %s", e)
                 return self._empty(req)
 
-        if status not in (200, 201):
-            logger.warning("Flynas API returned %d: %s", status, result.get("body", "")[:300])
-            if status in (403, 429):
-                _warm_ready = False
+            data = await self._search_in_browser(page, search_body)
+            if data is not None:
+                search_path = "in_browser"
+                logger.info(
+                    "Flynas: in-browser fallback succeeded for %s->%s in %.1fs",
+                    req.origin, req.destination, time.monotonic() - t0,
+                )
+                # Refresh cookie cache after successful in-browser search
+                await _extract_cookies_from_page(page)
+
+        if data is None:
             return self._empty(req)
 
-        try:
-            data = json.loads(result["body"])
-        except Exception:
-            logger.warning("Flynas: non-JSON response")
-            return self._empty(req)
-
-        # Parse response
+        # ── Parse response ────────────────────────────────────────────
         trips = data.get("flightsAvailability", {}).get("trips", [])
         outbound_flights = []
         return_flights = []
@@ -371,10 +538,11 @@ class FlynasConnectorClient:
                 offers.append(offer)
 
         offers.sort(key=lambda o: o.price)
+        elapsed = time.monotonic() - t0
 
         logger.info(
-            "Flynas %s→%s returned %d offers in %.1fs",
-            req.origin, req.destination, len(offers), elapsed,
+            "Flynas %s->%s returned %d offers in %.1fs (path=%s)",
+            req.origin, req.destination, len(offers), elapsed, search_path,
         )
 
         search_hash = hashlib.md5(
