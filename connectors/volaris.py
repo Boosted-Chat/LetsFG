@@ -62,7 +62,12 @@ def _get_proxy() -> Optional[dict]:
         return None
     from urllib.parse import urlparse
     p = urlparse(raw)
-    result: dict[str, str] = {"server": f"{p.scheme}://{p.hostname}:{p.port}"}
+    if not p.hostname:
+        return None
+    server = f"{p.scheme or 'http'}://{p.hostname}"
+    if p.port:
+        server += f":{p.port}"
+    result: dict = {"server": server}
     if p.username:
         result["username"] = p.username
     if p.password:
