@@ -68,9 +68,9 @@
 | 14 | luckyair | 8L | — | `done` | copilot-eurowings-fix | 2026-03-14T01:15Z | timeout enforcement + cleanup |
 | 15 | nineair | AQ | — | `done` | copilot-eurowings-fix | 2026-03-14T01:25Z | timeout + cleanup (works CAN→HRB 5 offers) |
 | 16 | norwegian | DY | [#22](https://github.com/Boosted-Chat/BoostedTravel/issues/22) | `done` | copilot-batikair-fix | 2026-03-13T21:17Z | Headed CDP Chrome for Incapsula cookies; 20 offers OSL→LGW 1.1s cached |
-| 17 | peach | MM | [#36](https://github.com/Boosted-Chat/BoostedTravel/issues/36) | `claimed` | claude-connector-fix | 2026-03-13T21:42Z | |
+| 17 | peach | MM | [#36](https://github.com/Boosted-Chat/BoostedTravel/issues/36) | `done` | claude-connector-fix | 2026-03-13T21:42Z | Headed CDP Chrome (no headless) + disable-http2 + modal dismissal; reCAPTCHA auto-passes with real CDP Chrome |
 | 18 | pegasus | PC | [#37](https://github.com/Boosted-Chat/BoostedTravel/issues/37) | `done` | copilot-main | 2026-03-13T22:15Z | MCP-style Chrome flags bypass Akamai; direct booking URL + /pegasus/availability interception; 40 offers SAW→AYT |
-| 19 | porter | — | [#24](https://github.com/Boosted-Chat/BoostedTravel/issues/24) | `broken` | | | |
+| 19 | porter | — | [#24](https://github.com/Boosted-Chat/BoostedTravel/issues/24) | `claimed` | copilot-eurowings-fix | 2026-03-14T01:30Z | |
 | 20 | scoot | TR | [#30](https://github.com/Boosted-Chat/BoostedTravel/issues/30) | `done` | copilot-batikair-fix | 2026-03-14T00:30Z | Headed CDP Chrome for Akamai bypass; 6 offers SIN→BKK 167.63 SGD |
 | 21 | volotea | V7 | [#18](https://github.com/Boosted-Chat/BoostedTravel/issues/18) | `claimed` | copilot-batikair-fix | 2026-03-14T01:00Z | |
 | 22 | volaris | Y4 | [#21](https://github.com/Boosted-Chat/BoostedTravel/issues/21) | `broken` | | | |
