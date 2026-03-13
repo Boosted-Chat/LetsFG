@@ -1,20 +1,17 @@
 """
-Jetstar Playwright scraper — CDP Chrome + bundle-data-v2 JSON extraction.
+Jetstar hybrid scraper — curl_cffi direct + Playwright CDP fallback.
 
 Jetstar (IATA: JQ) is an Australian low-cost airline in the Qantas Group,
 operating domestic/international flights across Asia-Pacific.
 
-Strategy:
-1. Launch real Chrome via subprocess + connect via CDP (port 9444) to bypass
-   Kasada bot challenge that blocks Playwright's bundled Chromium
-2. Navigate to booking.jetstar.com/au/en/booking/search-flights with query
-   params — Navitaire engine redirects to /select-flights with results
-3. Handle deeplink redirect page (click "Continue to booking" button)
-4. Dismiss "Multiple booking" overlay if present
-5. Extract <script id="bundle-data-v2" type="application/json"> containing
-   full flight data (~327KB) with Trips[].Flights[] structure
-6. Parse JourneySellKey for flight number/times, Bundles for prices
-7. Fallback: DOM extraction from aria-label price divs
+Hybrid strategy (Mar 2026):
+1. FAST PATH (~1-3s): curl_cffi with Chrome TLS impersonation fetches the
+   booking page HTML directly. Kasada's TLS/JA3 fingerprint check is
+   bypassed by curl_cffi's Chrome TLS stack. Extract bundle-data-v2 JSON
+   from the server-rendered HTML response.
+2. FALLBACK (~15-25s): Playwright CDP Chrome with persistent user-data-dir.
+   Navigate to booking page, handle deeplink redirect, dismiss overlays,
+   extract bundle-data-v2 or DOM-scrape flight cards.
 
 Booking engine observations (Mar 2026):
 - Navitaire-powered SSR booking at booking.jetstar.com
@@ -23,7 +20,7 @@ Booking engine observations (Mar 2026):
 - bundle-data-v2 JSON: Trips[0].Flights[] with JourneySellKey, Bundles[]
 - JourneySellKey format: "JQ~ 501~ ~~SYD~04/15/2026 06:00~MEL~04/15/2026 07:40~~"
 - Bundles[].RegularInclusiveAmount = regular price, CjInclusiveAmount = member price
-- Kasada challenge blocks Playwright Chromium; real Chrome bypasses it
+- Kasada challenge blocks Playwright Chromium; curl_cffi bypasses TLS check
 """
 
 from __future__ import annotations
@@ -40,6 +37,8 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
+from curl_cffi import requests as cffi_requests
+
 from boostedtravel.models.flights import (
     FlightOffer,
     FlightRoute,
@@ -50,6 +49,13 @@ from boostedtravel.models.flights import (
 from boostedtravel.connectors.browser import stealth_args, stealth_position_arg, stealth_popen_kwargs
 
 logger = logging.getLogger(__name__)
+
+# ── curl_cffi constants ──────────────────────────────────────────────────
+_IMPERSONATE = "chrome124"
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 _VIEWPORTS = [
     {"width": 1366, "height": 768},
@@ -180,7 +186,7 @@ async def _get_browser():
 
 
 class JetstarConnectorClient:
-    """Jetstar Playwright scraper -- direct URL to Navitaire booking engine + DOM extraction."""
+    """Jetstar hybrid scraper — curl_cffi direct + Playwright CDP fallback."""
 
     def __init__(self, timeout: float = 45.0):
         self.timeout = timeout
@@ -190,6 +196,17 @@ class JetstarConnectorClient:
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
+
+        # ── Fast path: curl_cffi direct HTTP (bypasses Kasada TLS check) ──
+        try:
+            offers = await self._curl_search(req)
+            if offers:
+                elapsed = time.monotonic() - t0
+                return self._build_response(offers, req, elapsed, source="curl_cffi")
+        except Exception as e:
+            logger.warning("Jetstar: curl_cffi fast path failed: %s", e)
+
+        # ── Slow path: Playwright CDP (original approach) ─────────────────
         adults = getattr(req, "adults", 1) or 1
         dep = req.date_from.strftime("%Y-%m-%d")
         search_url = (
@@ -212,6 +229,150 @@ class JetstarConnectorClient:
                 logger.warning("Jetstar: attempt %d/%d error: %s", attempt, _MAX_ATTEMPTS, e)
 
         return self._empty(req)
+
+    # ------------------------------------------------------------------
+    # curl_cffi fast path
+    # ------------------------------------------------------------------
+
+    async def _curl_search(
+        self, req: FlightSearchRequest,
+    ) -> Optional[list[FlightOffer]]:
+        """Fetch booking page HTML via curl_cffi and extract bundle-data-v2."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._curl_search_sync, req)
+
+    def _curl_search_sync(
+        self, req: FlightSearchRequest,
+    ) -> Optional[list[FlightOffer]]:
+        """Synchronous curl_cffi search — fetch HTML, extract flight data."""
+        sess = cffi_requests.Session(impersonate=_IMPERSONATE)
+
+        url = self._build_booking_url(req)
+        headers = {
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;"
+                "q=0.9,image/avif,image/webp,*/*;q=0.8"
+            ),
+            "Accept-Language": "en-AU,en;q=0.9,en-US;q=0.8",
+            "User-Agent": _UA,
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
+            "Cache-Control": "no-cache",
+        }
+
+        try:
+            r = sess.get(url, headers=headers, timeout=25, allow_redirects=True)
+        except Exception as e:
+            logger.warning("Jetstar curl_cffi: request error: %s", e)
+            return None
+
+        if r.status_code != 200:
+            logger.warning("Jetstar curl_cffi: HTTP %d", r.status_code)
+            return None
+
+        html = r.text
+
+        # Detect Kasada/bot challenge page (small HTML with challenge scripts)
+        if len(html) < 5000 and any(
+            k in html.lower() for k in ("kasada", "/ips-d/", "challenge", "blocked")
+        ):
+            logger.info("Jetstar curl_cffi: Kasada challenge detected, skipping")
+            return None
+
+        # Strategy 1: Extract bundle-data-v2 from the final page
+        offers = self._extract_offers_from_html(html, req)
+        if offers:
+            return offers
+
+        # Strategy 2: If on deeplinksv2 interim page, follow the redirect link
+        final_url = str(r.url)
+        if "deeplink" in final_url.lower() or "continue" in html.lower():
+            redirect_url = self._extract_deeplink_url(html, final_url)
+            if redirect_url:
+                try:
+                    r2 = sess.get(
+                        redirect_url, headers=headers,
+                        timeout=20, allow_redirects=True,
+                    )
+                    if r2.status_code == 200:
+                        offers = self._extract_offers_from_html(r2.text, req)
+                        if offers:
+                            return offers
+                except Exception as e:
+                    logger.debug("Jetstar curl_cffi: deeplink follow failed: %s", e)
+
+        return None
+
+    def _extract_offers_from_html(
+        self, html: str, req: FlightSearchRequest,
+    ) -> Optional[list[FlightOffer]]:
+        """Extract bundle-data-v2 JSON from server-rendered HTML."""
+        # <script id="bundle-data-v2" type="application/json">{...}</script>
+        m = re.search(
+            r'<script\s+id=["\']bundle-data(?:-v2)?["\']\s+'
+            r'type=["\']application/json["\']>\s*(.*?)\s*</script>',
+            html, re.DOTALL,
+        )
+        if not m:
+            # Try without type attribute
+            m = re.search(
+                r'<script\s+id=["\']bundle-data(?:-v2)?["\']>\s*(.*?)\s*</script>',
+                html, re.DOTALL,
+            )
+        if not m:
+            logger.debug(
+                "Jetstar curl_cffi: no bundle-data in HTML (%d bytes)", len(html),
+            )
+            return None
+
+        try:
+            data = json.loads(m.group(1))
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.debug("Jetstar curl_cffi: bundle-data parse error: %s", e)
+            return None
+
+        offers = self._parse_bundle_data_v2(data, req)
+        if offers:
+            logger.info(
+                "Jetstar curl_cffi: extracted %d offers from HTML bundle-data",
+                len(offers),
+            )
+        return offers or None
+
+    @staticmethod
+    def _extract_deeplink_url(html: str, base_url: str) -> Optional[str]:
+        """Extract redirect URL from deeplinksv2 interim page."""
+        from urllib.parse import urljoin
+
+        # Link to select-flights page
+        m = re.search(
+            r'href=["\']([^"\']*select-flights[^"\']*)["\']', html,
+        )
+        if m:
+            return urljoin(base_url, m.group(1))
+
+        # Form action URL
+        m = re.search(r'action=["\']([^"\']+)["\']', html)
+        if m:
+            target = m.group(1)
+            if "booking" in target.lower() or "select" in target.lower():
+                return urljoin(base_url, target)
+
+        # Meta refresh redirect
+        m = re.search(
+            r'content=["\'][^"\']*URL=([^"\';\\s]+)', html, re.IGNORECASE,
+        )
+        if m:
+            return urljoin(base_url, m.group(1))
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Playwright fallback (original approach)
+    # ------------------------------------------------------------------
 
     async def _attempt_search(
         self, url: str, req: FlightSearchRequest
@@ -860,9 +1021,9 @@ class JetstarConnectorClient:
             cabin_class="M",
         )
 
-    def _build_response(self, offers: list[FlightOffer], req: FlightSearchRequest, elapsed: float) -> FlightSearchResponse:
+    def _build_response(self, offers: list[FlightOffer], req: FlightSearchRequest, elapsed: float, source: str = "Playwright") -> FlightSearchResponse:
         offers.sort(key=lambda o: o.price)
-        logger.info("Jetstar %s->%s returned %d offers in %.1fs (Playwright)", req.origin, req.destination, len(offers), elapsed)
+        logger.info("Jetstar %s->%s returned %d offers in %.1fs (%s)", req.origin, req.destination, len(offers), elapsed, source)
         h = hashlib.md5(f"jetstar{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
