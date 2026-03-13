@@ -52,6 +52,23 @@ _TIMEZONES = [
     "America/Mexico_City", "America/Cancun", "America/Tijuana",
     "America/Chicago", "America/Los_Angeles",
 ]
+_MAX_ATTEMPTS = 2
+
+
+def _get_proxy() -> Optional[dict]:
+    """Read proxy config from VOLARIS_PROXY env var (US/MX IP required)."""
+    raw = os.environ.get("VOLARIS_PROXY", "").strip()
+    if not raw:
+        return None
+    from urllib.parse import urlparse
+    p = urlparse(raw)
+    result: dict[str, str] = {"server": f"{p.scheme}://{p.hostname}:{p.port}"}
+    if p.username:
+        result["username"] = p.username
+    if p.password:
+        result["password"] = p.password
+    return result
+
 
 # ── Shared browser singleton via CDP ────────────────────────────────────
 _CDP_PORT = 9466
@@ -95,8 +112,24 @@ class VolarisConnectorClient:
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
+
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                offers = await self._attempt_search(req, t0)
+                if offers is not None:
+                    elapsed = time.monotonic() - t0
+                    return self._build_response(offers, req, elapsed)
+                logger.warning("Volaris: attempt %d/%d got no results", attempt, _MAX_ATTEMPTS)
+            except Exception as e:
+                logger.warning("Volaris: attempt %d/%d error: %s", attempt, _MAX_ATTEMPTS, e)
+
+        return self._empty(req)
+
+    async def _attempt_search(self, req: FlightSearchRequest, t0: float) -> Optional[list[FlightOffer]]:
         browser = await _get_browser()
+        proxy = _get_proxy()
         context = await browser.new_context(
+            proxy=proxy,
             viewport=random.choice(_VIEWPORTS),
             locale=random.choice(_LOCALES),
             timezone_id=random.choice(_TIMEZONES),
@@ -120,40 +153,48 @@ class VolarisConnectorClient:
 
             captured_data: dict = {}
             api_event = asyncio.Event()
+            search_clicked: dict = {"ready": False}
 
             async def on_response(response):
+                if not search_clicked["ready"]:
+                    return
                 try:
                     url = response.url.lower()
                     status = response.status
+                    if status != 200:
+                        return
                     ct = response.headers.get("content-type", "")
-                    if status == 200 and "json" in ct and (
-                        "availability" in url
-                        or "flights/search" in url
-                        or "/api/v1/flights" in url
-                        or "/api/nsk/" in url
-                        or "search/results" in url
-                        or "offers" in url
-                        or "fares" in url
-                        or "shopping" in url
-                        or "lowfare" in url
-                        or "apigw.volaris.com" in url
-                    ):
+                    if "json" not in ct:
+                        return
+                    if any(k in url for k in [
+                        "availability", "flights/search", "flightsearch",
+                        "search/flights", "/api/v1/flights", "/api/v2/flights",
+                        "/api/nsk/", "navi", "nskts",
+                        "search/results", "booking/search",
+                        "offers", "fares", "shopping",
+                        "lowfare", "low-fare", "air-bounds", "trips",
+                        "apigw.volaris.com/api/",
+                    ]):
                         data = await response.json()
                         if data and isinstance(data, (dict, list)):
-                            # Check for flight-relevant data
                             if isinstance(data, list) or (
                                 isinstance(data, dict) and any(
                                     k in data for k in [
                                         "trips", "journeys", "flights",
                                         "availability", "data", "offers",
                                         "schedules", "outbound", "outboundFlights",
-                                        "lowFareAvailability",
+                                        "lowFareAvailability", "results",
+                                        "itineraries", "searchResults",
+                                        "fareAvailability", "lowFareList",
                                     ]
                                 )
                             ):
                                 captured_data["json"] = data
                                 api_event.set()
-                                logger.info("Volaris: captured flight API response")
+                                logger.info(
+                                    "Volaris: captured flight API response from %s",
+                                    response.url[:120],
+                                )
                 except Exception:
                     pass
 
@@ -178,27 +219,30 @@ class VolarisConnectorClient:
             ok = await self._fill_airport_field(page, "From", "Desde", req.origin, 0)
             if not ok:
                 logger.warning("Volaris: origin fill failed")
-                return self._empty(req)
+                return None
             await asyncio.sleep(0.5)
 
             ok = await self._fill_airport_field(page, "To", "A", req.destination, 1)
             if not ok:
                 logger.warning("Volaris: destination fill failed")
-                return self._empty(req)
+                return None
             await asyncio.sleep(0.5)
 
             ok = await self._fill_date(page, req)
             if not ok:
                 logger.warning("Volaris: date fill failed")
-                return self._empty(req)
+                return None
             await asyncio.sleep(0.3)
 
+            search_clicked["ready"] = True
             await self._click_search(page)
 
-            # The search navigates to /flight/select (Navitaire Angular app).
-            # Wait for navigation then for API data.
+            # Wait for navigation to results page (Navitaire Angular app).
             try:
-                await page.wait_for_url("**/flight/select**", timeout=15000)
+                await page.wait_for_url(
+                    re.compile(r"/(flight|booking|book)/(select|search|results)", re.IGNORECASE),
+                    timeout=15000,
+                )
             except Exception:
                 pass  # may already be on the page or URL pattern differs
 
@@ -208,21 +252,17 @@ class VolarisConnectorClient:
             except asyncio.TimeoutError:
                 logger.warning("Volaris: timed out waiting for API response")
                 offers = await self._extract_from_dom(page, req)
-                if offers:
-                    return self._build_response(offers, req, time.monotonic() - t0)
-                return self._empty(req)
+                return offers if offers else None
 
             data = captured_data.get("json", {})
             if not data:
-                return self._empty(req)
+                return None
 
-            elapsed = time.monotonic() - t0
-            offers = self._parse_response(data, req)
-            return self._build_response(offers, req, elapsed)
+            return self._parse_response(data, req)
 
         except Exception as e:
             logger.error("Volaris Playwright error: %s", e)
-            return self._empty(req)
+            return None
         finally:
             await context.close()
 
@@ -423,15 +463,21 @@ class VolarisConnectorClient:
         try:
             await asyncio.sleep(5)
 
-            # First check for JSON state in the page
+            # Check for JSON state in the page (SPA frameworks + Navitaire Angular)
             data = await page.evaluate("""() => {
                 if (window.__NEXT_DATA__) return window.__NEXT_DATA__;
                 if (window.__NUXT__) return window.__NUXT__;
+                // Navitaire Angular state
+                try {
+                    const root = document.querySelector('mbs-root, app-root, [ng-version]');
+                    if (root && root.__ngContext__) return root.__ngContext__;
+                } catch {}
                 const scripts = document.querySelectorAll('script[type="application/json"]');
                 for (const s of scripts) {
                     try {
                         const d = JSON.parse(s.textContent);
-                        if (d && (d.flights || d.journeys || d.fares || d.availability)) return d;
+                        if (d && (d.flights || d.journeys || d.fares || d.availability
+                                  || d.trips || d.results || d.itineraries)) return d;
                     } catch {}
                 }
                 return null;
@@ -471,7 +517,7 @@ class VolarisConnectorClient:
         booking_url = self._build_booking_url(req)
         offers: list[FlightOffer] = []
 
-        # Navitaire-style response
+        # Navitaire-style response — try multiple extraction paths
         flights_raw = (
             data.get("trips", [{}])[0].get("dates", [{}])[0].get("journeys") if data.get("trips") else None
         ) or (
@@ -479,7 +525,14 @@ class VolarisConnectorClient:
             or data.get("outbound")
             or data.get("journeys")
             or data.get("flights")
+            or data.get("results")
+            or data.get("itineraries")
+            or data.get("searchResults")
+            or data.get("lowFareList")
+            or data.get("fareAvailability", {}).get("journeys", [])
             or data.get("data", {}).get("flights", [])
+            or data.get("data", {}).get("journeys", [])
+            or data.get("data", {}).get("results", [])
             or []
         )
         if isinstance(flights_raw, dict):
