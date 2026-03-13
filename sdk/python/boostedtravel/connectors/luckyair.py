@@ -43,8 +43,6 @@ from boostedtravel.models.flights import (
     FlightSearchResponse,
     FlightSegment,
 )
-from boostedtravel.connectors.browser import stealth_args
-
 logger = logging.getLogger(__name__)
 
 # ── Module-level browser state (cleaned up by engine.py) ───────────────────
@@ -69,17 +67,19 @@ async def _get_browser():
         return _browser
 
     from playwright.async_api import async_playwright
+    from boostedtravel.connectors.browser import stealth_args
     _pw_instance = await async_playwright().start()
+    _args = [*stealth_args(), "--lang=zh-CN"]
     try:
         _browser = await _pw_instance.chromium.launch(
             headless=True,
             channel="chrome",
-            args=[*stealth_args(), "--lang=zh-CN"],
+            args=_args,
         )
     except Exception:
         _browser = await _pw_instance.chromium.launch(
             headless=True,
-            args=[*stealth_args(), "--lang=zh-CN"],
+            args=_args,
         )
     logger.info("Lucky Air: browser launched")
     return _browser
@@ -144,7 +144,7 @@ class LuckyAirConnectorClient:
     ) -> list[FlightOffer]:
         """Fill form to trigger calendar API, intercept the response."""
 
-        remaining = lambda: max(self.timeout - (time.monotonic() - t0), 5)
+        remaining = lambda: max(self.timeout - (time.monotonic() - t0), 1)
 
         captured_data: dict = {}
         api_event = asyncio.Event()
@@ -262,6 +262,11 @@ class LuckyAirConnectorClient:
                             return entries
                     except ValueError:
                         pass
+
+            # Break if overall timeout exhausted
+            if remaining() <= 1:
+                logger.debug("Lucky Air: timeout reached at month step %d", i + 1)
+                break
 
             # Click next month
             api_event.clear()
