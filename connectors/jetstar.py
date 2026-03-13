@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html as html_mod
 import json
 import logging
 import os
@@ -644,18 +645,17 @@ class JetstarConnectorClient:
         return None
 
     @staticmethod
-    def _extract_flight_json_from_html(html: str) -> Optional[dict]:
+    def _extract_flight_json_from_html(page_html: str) -> Optional[dict]:
         """Extract Navitaire FlightData or availability JSON from inline scripts."""
-        import html as html_mod
         # FlightData = '...';
-        m = re.search(r"FlightData\s*=\s*'([\s\S]*?)';", html)
+        m = re.search(r"FlightData\s*=\s*'([\s\S]*?)';", page_html)
         if m:
             try:
                 return json.loads(html_mod.unescape(m.group(1)))
             except (json.JSONDecodeError, ValueError):
                 pass
         # availability = {...};
-        m = re.search(r"(?:availability|AvailabilityV2|flightSearch)\s*=\s*(\{[\s\S]*?\});", html)
+        m = re.search(r"(?:availability|AvailabilityV2|flightSearch)\s*=\s*(\{[\s\S]*?\});", page_html)
         if m:
             try:
                 return json.loads(m.group(1))
@@ -838,8 +838,6 @@ class JetstarConnectorClient:
 
     async def _extract_flight_data(self, page) -> Optional[dict]:
         """Fallback: try to extract Navitaire FlightData JSON from inline <script> tags."""
-        import html as html_mod
-
         raw = await page.evaluate(r"""() => {
             const scripts = document.querySelectorAll('script');
             for (const s of scripts) {
