@@ -1,24 +1,23 @@
 """
-Jet2 hybrid scraper — cookie-farm + curl_cffi direct page fetch.
+Jet2 hybrid scraper — CDP Chrome + curl_cffi direct page fetch.
 
 Jet2 (IATA: LS) is a British low-cost leisure airline operating from
 14 UK airports to 75+ destinations across Europe and beyond.
 
-Strategy (hybrid cookie-farm, updated Mar 2026):
-  1. ONCE per ~25 min: Playwright opens jet2.com homepage, accepts cookies.
-     This generates valid Akamai WAF cookies. Extract all cookies via context.cookies().
-  2. For each search: curl_cffi fetches two endpoints with farmed cookies:
-     a) /client/api/search-panels/flight-schedules/outbound?departures={iata}&arrivals={iata}
-        → Returns which dates have flights (no prices)
-     b) /en/cheap-flights/{origin-slug}/{dest-slug}?from=YYYY-MM-DD&...
-        → HTML page with embedded £ prices in calendar cells
-  3. Parse prices from HTML via regex + optional schedule API cross-check
+Strategy (hybrid CDP Chrome + curl_cffi, updated Mar 2026):
+  1. Fast path: cookieless curl_cffi to /client/api/ schedule endpoint
+     and /en/cheap-flights/ HTML page (works intermittently).
+  2. Medium path: CDP Chrome with persistent user-data-dir farms cookies
+     on jet2.com homepage, then curl_cffi uses farmed cookies.
+  3. Fallback: in-browser page.evaluate(fetch) for API calls.
+  4. Last resort: full Playwright navigation + DOM calendar parse.
 
-  Result: ~1-3s per search instead of ~20-30s with full Playwright.
+  CDP Chrome with persistent profile helps bypass PerimeterX by building
+  trust over time (vs fresh Playwright sessions that PX blocks immediately).
 
   URL routing: /en/cheap-flights/{origin-slug}/{dest-slug}?from=YYYY-MM-DD&to=...&adults=N
   Cookie banner: OneTrust ("Accept All Cookies")
-  Anti-bot: Akamai Bot Manager — cookies farmed via headed Playwright
+  Anti-bot: PerimeterX — bypassed via persistent CDP Chrome profile
 """
 
 from __future__ import annotations
@@ -27,6 +26,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -42,7 +42,7 @@ from models.flights import (
     FlightSearchResponse,
     FlightSegment,
 )
-from connectors.browser import stealth_args
+from connectors.browser import get_or_launch_cdp, stealth_args
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +64,18 @@ _TIMEZONES = [
     "Europe/Paris", "Europe/Madrid",
 ]
 
-# ── Shared browser singleton ──────────────────────────────────────────────
-_pw_instance = None
+# ── CDP Chrome config ──────────────────────────────────────────────────────
+_CDP_PORT = 9452
+_USER_DATA_DIR = os.path.join(os.environ.get("TEMP", "/tmp"), ".jet2_chrome_data")
+
+# ── Shared browser singleton via CDP ──────────────────────────────────────
+_chrome_proc = None
 _browser = None
 _browser_lock: Optional[asyncio.Lock] = None
+
+# ── Rate limiting ─────────────────────────────────────────────────────────
+_last_request: float = 0.0
+_MIN_REQUEST_INTERVAL = 1.5  # seconds between requests to jet2.com
 
 # ── Cookie farm state ─────────────────────────────────────────────────────
 _farm_lock: Optional[asyncio.Lock] = None
@@ -127,21 +135,20 @@ def _get_slug_lock() -> asyncio.Lock:
 
 
 async def _get_browser():
-    """Shared headed Chromium (launched once, reused across searches)."""
-    global _pw_instance, _browser
+    """Connect to a real Chrome instance via CDP (launched once, reused)."""
+    global _chrome_proc, _browser
     lock = _get_lock()
     async with lock:
         if _browser and _browser.is_connected():
             return _browser
-        from connectors.browser import launch_headed_browser
-        _browser = await launch_headed_browser()
-        logger.info("Jet2: browser launched")
+        _browser, _chrome_proc = await get_or_launch_cdp(_CDP_PORT, _USER_DATA_DIR)
+        logger.info("Jet2: Chrome ready via CDP (port %d)", _CDP_PORT)
         return _browser
 
 
 async def _reset_browser():
-    """Close and reset browser (used when PX blocks the session)."""
-    global _pw_instance, _browser
+    """Close and reset CDP browser (used when PX blocks the session)."""
+    global _chrome_proc, _browser
     lock = _get_lock()
     async with lock:
         if _browser:
@@ -150,11 +157,27 @@ async def _reset_browser():
             except Exception:
                 pass
             _browser = None
-        _pw_instance = None
+        if _chrome_proc:
+            try:
+                _chrome_proc.terminate()
+                _chrome_proc.wait(timeout=5)
+            except Exception:
+                pass
+            _chrome_proc = None
+
+
+def _rate_limit():
+    """Enforce minimum interval between requests to avoid PX triggers."""
+    global _last_request
+    now = time.monotonic()
+    elapsed = now - _last_request
+    if elapsed < _MIN_REQUEST_INTERVAL:
+        time.sleep(_MIN_REQUEST_INTERVAL - elapsed)
+    _last_request = time.monotonic()
 
 
 class Jet2ConnectorClient:
-    """Jet2 hybrid scraper — cookie-farm + curl_cffi direct fetch."""
+    """Jet2 hybrid scraper — CDP Chrome + curl_cffi direct fetch."""
 
     def __init__(self, timeout: float = 45.0):
         self.timeout = timeout
@@ -164,57 +187,66 @@ class Jet2ConnectorClient:
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
         """
-        Search Jet2 flights via cookie-farm + curl_cffi.
+        Search Jet2 flights via CDP Chrome + curl_cffi.
 
-        Fast path (~1-3s): curl_cffi fetches the cheap-flights page with farmed cookies.
-        Slow path (~15s): Playwright farms cookies first, then curl_cffi.
-        Fallback: Full Playwright interception if API/HTML fails.
+        Fast path (~1-3s): cookieless curl_cffi to cheap-flights HTML page.
+        Medium path (~5s): curl_cffi with farmed cookies from CDP Chrome.
+        Fallback (~15-25s): CDP Chrome in-browser fetch or DOM parse.
         """
         t0 = time.monotonic()
 
         try:
+            # Fast path: try cookieless curl_cffi first (no browser needed)
+            offers = await self._api_search(req, cookies=[])
+            if offers is not None:
+                logger.info("Jet2: cookieless API succeeded")
+                return self._finalize(offers, req, t0, "cookieless API")
+
+            # Medium path: farm cookies via CDP Chrome, then curl_cffi
             cookies = await self._ensure_cookies()
-            if not cookies:
-                logger.warning("Jet2: cookie farm failed, falling back to Playwright")
-                return await self._playwright_fallback(req, t0)
+            if cookies:
+                offers = await self._api_search(req, cookies)
+                if offers is not None:
+                    return self._finalize(offers, req, t0, "hybrid API")
 
-            offers = await self._api_search(req, cookies)
-
-            # If failed (expired cookies), re-farm once and retry
-            if offers is None:
+                # Re-farm once if stale
                 logger.info("Jet2: API search failed, re-farming cookies")
                 cookies = await self._farm_cookies()
                 if cookies:
                     offers = await self._api_search(req, cookies)
+                    if offers is not None:
+                        return self._finalize(offers, req, t0, "re-farmed API")
 
-            # If API still fails, fall back to full Playwright
-            if offers is None:
-                logger.warning("Jet2: API search returned no data, falling back to Playwright")
-                return await self._playwright_fallback(req, t0)
-
-            elapsed = time.monotonic() - t0
-            if offers:
-                offers.sort(key=lambda o: o.price)
-
-            logger.info(
-                "Jet2 %s→%s returned %d offers in %.1fs (hybrid API)",
-                req.origin, req.destination, len(offers), elapsed,
-            )
-
-            search_hash = hashlib.md5(
-                f"jet2{req.origin}{req.destination}{req.date_from}".encode()
-            ).hexdigest()[:12]
-            return FlightSearchResponse(
-                search_id=f"fs_{search_hash}",
-                origin=req.origin,
-                destination=req.destination,
-                currency=offers[0].currency if offers else "GBP",
-                offers=offers,
-                total_results=len(offers),
-            )
+            # Fallback: full CDP Chrome Playwright flow
+            logger.warning("Jet2: API paths exhausted, falling back to Playwright")
+            return await self._playwright_fallback(req, t0)
         except Exception as e:
             logger.error("Jet2: hybrid search error: %s", e)
             return await self._playwright_fallback(req, t0)
+
+    def _finalize(
+        self, offers: list[FlightOffer], req: FlightSearchRequest,
+        t0: float, method: str,
+    ) -> FlightSearchResponse:
+        """Sort offers and build response."""
+        elapsed = time.monotonic() - t0
+        if offers:
+            offers.sort(key=lambda o: o.price)
+        logger.info(
+            "Jet2 %s→%s returned %d offers in %.1fs (%s)",
+            req.origin, req.destination, len(offers), elapsed, method,
+        )
+        search_hash = hashlib.md5(
+            f"jet2{req.origin}{req.destination}{req.date_from}".encode()
+        ).hexdigest()[:12]
+        return FlightSearchResponse(
+            search_id=f"fs_{search_hash}",
+            origin=req.origin,
+            destination=req.destination,
+            currency=offers[0].currency if offers else "GBP",
+            offers=offers,
+            total_results=len(offers),
+        )
 
     # ------------------------------------------------------------------
     # Cookie farm
@@ -228,7 +260,7 @@ class Jet2ConnectorClient:
         return await self._farm_cookies()
 
     async def _farm_cookies(self) -> list[dict]:
-        """Load Jet2 homepage in Playwright to farm Akamai cookies."""
+        """Load Jet2 homepage in CDP Chrome to farm PX cookies."""
         global _farmed_cookies, _farm_timestamp
         lock = _get_farm_lock()
         async with lock:
@@ -264,24 +296,32 @@ class Jet2ConnectorClient:
 
                 page.on("response", on_response)
 
-                logger.info("Jet2: farming cookies via homepage load")
+                logger.info("Jet2: farming cookies via CDP Chrome homepage load")
                 await page.goto(
                     "https://www.jet2.com/",
                     wait_until="domcontentloaded",
-                    timeout=30000,
+                    timeout=45000,
                 )
-                await asyncio.sleep(2.0)
+                # Longer wait for PerimeterX to initialize and pass challenge
+                await asyncio.sleep(8.0)
 
                 # Dismiss OneTrust cookie banner
                 await self._dismiss_overlays(page)
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(2.0)
+
+                # Check for PX block
+                content = await page.content()
+                if "Access Denied" in content or "px-captcha" in content.lower():
+                    logger.warning("Jet2: PX challenge on homepage, waiting longer")
+                    await asyncio.sleep(10.0)
+                    await self._dismiss_overlays(page)
 
                 # Extract cookies
                 cookies = await context.cookies()
                 if cookies:
                     _farmed_cookies = cookies
                     _farm_timestamp = time.monotonic()
-                    logger.info("Jet2: farmed %d cookies", len(cookies))
+                    logger.info("Jet2: farmed %d cookies via CDP Chrome", len(cookies))
                     return cookies
                 return []
             except Exception as e:
@@ -305,14 +345,45 @@ class Jet2ConnectorClient:
         self, req: FlightSearchRequest, cookies: list[dict],
     ) -> Optional[list[FlightOffer]]:
         """Synchronous curl_cffi: fetch cheap-flights HTML page + extract prices."""
+        _rate_limit()
+
         sess = cffi_requests.Session(impersonate=_IMPERSONATE)
 
-        # Load farmed cookies
+        # Load farmed cookies (may be empty for cookieless path)
         for c in cookies:
             domain = c.get("domain", "")
             sess.cookies.set(c["name"], c["value"], domain=domain)
 
-        # Resolve slugs
+        # Try schedule API first (uses IATA codes, no slugs needed)
+        try:
+            _rate_limit()
+            r_sched = sess.get(
+                f"https://www.jet2.com/client/api/search-panels/flight-schedules/outbound"
+                f"?departures={req.origin.lower()}&arrivals={req.destination.lower()}&xmsversion=2",
+                headers={
+                    "Accept": "application/json, text/plain, */*",
+                    "Accept-Language": "en-GB,en;q=0.9",
+                    "Referer": "https://www.jet2.com/",
+                },
+                timeout=10,
+            )
+            if r_sched.status_code == 200:
+                ct = r_sched.headers.get("content-type", "")
+                if "json" in ct:
+                    sched = r_sched.json()
+                    year_str = str(req.date_from.year)
+                    month_str = str(req.date_from.month)
+                    day_str = str(req.date_from.day)
+                    year_data = sched.get(year_str, {})
+                    month_data = year_data.get(month_str, {})
+                    days = month_data.get("days", {})
+                    if day_str not in days:
+                        logger.info("Jet2: schedule API says no flight on %s", req.date_from)
+                        return []  # Confirmed: no flights on this date
+        except Exception:
+            pass
+
+        # Resolve slugs for cheap-flights page
         origin_slug = self._resolve_slug_sync(req.origin)
         dest_slug = self._resolve_slug_sync(req.destination)
         if not origin_slug or not dest_slug:
@@ -329,6 +400,7 @@ class Jet2ConnectorClient:
         )
 
         try:
+            _rate_limit()
             r = sess.get(
                 search_url,
                 headers={
@@ -349,41 +421,11 @@ class Jet2ConnectorClient:
         # Extract prices from HTML
         html = r.text
         if "Access Denied" in html or "PerimeterX" in html:
-            logger.warning("Jet2: Akamai/PX block on cheap-flights page")
+            logger.warning("Jet2: PX block on cheap-flights page")
             return None
 
         offers = self._parse_html_prices(html, req)
-        if offers is not None:
-            return offers
-
-        # Try schedule API as extra signal (no prices, just availability)
-        try:
-            r2 = sess.get(
-                f"https://www.jet2.com/client/api/search-panels/flight-schedules/outbound"
-                f"?departures={req.origin.lower()}&arrivals={req.destination.lower()}&xmsversion=2",
-                headers={
-                    "Accept": "application/json, text/plain, */*",
-                    "Referer": "https://www.jet2.com/",
-                },
-                timeout=10,
-            )
-            if r2.status_code == 200:
-                ct = r2.headers.get("content-type", "")
-                if "json" in ct:
-                    sched = r2.json()
-                    year_str = str(req.date_from.year)
-                    month_str = str(req.date_from.month)
-                    day_str = str(req.date_from.day)
-                    year_data = sched.get(year_str, {})
-                    month_data = year_data.get(month_str, {})
-                    days = month_data.get("days", {})
-                    if day_str not in days:
-                        logger.info("Jet2: schedule API says no flight on %s", req.date_from)
-                        return []  # Confirmed: no flights
-        except Exception:
-            pass
-
-        return None  # signal to fall back
+        return offers  # None signals fallback needed
 
     def _parse_html_prices(
         self, html: str, req: FlightSearchRequest,
@@ -438,18 +480,18 @@ class Jet2ConnectorClient:
     async def _playwright_fallback(
         self, req: FlightSearchRequest, t0: float,
     ) -> FlightSearchResponse:
-        """Full Playwright interception flow as fallback."""
+        """Full CDP Chrome interception flow as fallback."""
         last_error = None
         for attempt in range(2):
             if attempt > 0:
-                logger.info("Jet2: retry %d with fresh browser", attempt)
+                logger.info("Jet2: retry %d with fresh CDP browser", attempt)
                 await _reset_browser()
                 await asyncio.sleep(3.0)
             try:
                 return await self._do_search(req, t0)
             except Exception as e:
                 last_error = e
-                if "ERR_HTTP2" in str(e) or "ERR_CONNECTION" in str(e):
+                if "ERR_HTTP2" in str(e) or "ERR_CONNECTION" in str(e) or "Timeout" in str(e):
                     continue
                 raise
         logger.error("Jet2: all attempts failed: %s", last_error)
@@ -518,38 +560,57 @@ class Jet2ConnectorClient:
             page.on("response", on_response)
 
             # ── Step 1: Navigate to homepage to establish session + get airport mapping
-            logger.info("Jet2: loading homepage for %s→%s", req.origin, req.destination)
+            logger.info("Jet2: CDP Chrome loading homepage for %s→%s", req.origin, req.destination)
             await page.goto(
                 "https://www.jet2.com/",
                 wait_until="domcontentloaded",
-                timeout=int(self.timeout * 1000),
+                timeout=45000,
             )
-            await asyncio.sleep(2.0)
+            # Longer wait for PerimeterX to initialize and pass challenge
+            await asyncio.sleep(8.0)
 
             # Dismiss cookie consent + PerimeterX overlays
             await self._dismiss_overlays(page)
+            await asyncio.sleep(2.0)
 
-            # Wait briefly for allairportinformation API
-            await asyncio.sleep(1.0)
+            # Check for PX block and wait if needed
+            content = await page.content()
+            if "Access Denied" in content or "px-captcha" in content.lower():
+                logger.warning("Jet2: PX challenge detected, waiting for resolution")
+                await asyncio.sleep(10.0)
+                await self._dismiss_overlays(page)
 
-            # ── Step 2: Try direct API fetch for flight schedules (uses IATA codes)
+            # Also update cookie farm from this browser session
+            global _farmed_cookies, _farm_timestamp
+            cookies = await context.cookies()
+            if cookies:
+                _farmed_cookies = cookies
+                _farm_timestamp = time.monotonic()
+
+            # ── Step 2: Try in-browser fetch for schedule API (uses page session)
             direct_data = await self._try_direct_api(page, req)
             if direct_data:
                 captured["schedules"] = direct_data
                 schedule_event.set()
 
-            # ── Step 3: Resolve IATA → slug
+            # ── Step 3: Try in-browser fetch for cheap-flights HTML
             origin_slug = await self._resolve_slug(req.origin)
             dest_slug = await self._resolve_slug(req.destination)
+
+            if origin_slug and dest_slug:
+                html_offers = await self._try_in_browser_html_fetch(page, req, origin_slug, dest_slug)
+                if html_offers is not None:
+                    elapsed = time.monotonic() - t0
+                    if html_offers:
+                        return self._build_response(html_offers, req, elapsed)
 
             if not origin_slug or not dest_slug:
                 logger.warning("Jet2: could not resolve slugs for %s→%s (got %s→%s)",
                                req.origin, req.destination, origin_slug, dest_slug)
                 return self._empty(req)
 
-            # ── Step 3: Navigate to search results page
+            # ── Step 4: Navigate to search results page (last resort)
             dep = req.date_from.strftime("%Y-%m-%d")
-            # Jet2 URL format: children param has no value when 0 children
             children_param = f"children={req.children}" if req.children > 0 else "children"
             search_url = (
                 f"https://www.jet2.com/en/cheap-flights/{origin_slug}/{dest_slug}"
@@ -561,41 +622,37 @@ class Jet2ConnectorClient:
             await page.goto(
                 search_url,
                 wait_until="domcontentloaded",
-                timeout=int(self.timeout * 1000),
+                timeout=45000,
             )
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(3.0)
             await self._dismiss_overlays(page)
 
             # ── Step 5: Wait for calendar prices to render in DOM
             try:
                 await page.wait_for_selector(
                     "table td, [class*='calendar'], [class*='price']",
-                    timeout=10000,
+                    timeout=15000,
                 )
-                await asyncio.sleep(2.0)  # Extra time for prices to populate
+                await asyncio.sleep(2.0)
             except Exception:
                 logger.debug("Jet2: no calendar table found after results page load")
                 await asyncio.sleep(3.0)
 
-            await self._dismiss_overlays(page)  # Re-dismiss any new overlays
+            await self._dismiss_overlays(page)
 
             # ── Step 6: Parse results
             elapsed = time.monotonic() - t0
             offers: list[FlightOffer] = []
 
-            # Try flight_details first (most detailed)
             if "flight_details" in captured:
                 offers = self._parse_flight_details(captured["flight_details"], req)
 
-            # Try schedule data
             if not offers and "schedules" in captured:
                 offers = self._parse_schedule_data(captured["schedules"], req)
 
-            # Try generic API data
             if not offers and "generic" in captured:
                 offers = self._parse_generic_api(captured["generic"], req)
 
-            # Fallback: parse DOM calendar
             if not offers:
                 offers = await self._parse_dom_calendar(page, req)
 
@@ -604,8 +661,7 @@ class Jet2ConnectorClient:
             return self._empty(req)
 
         except Exception as e:
-            # Let HTTP/2 and connection errors propagate for retry
-            if "ERR_HTTP2" in str(e) or "ERR_CONNECTION" in str(e):
+            if "ERR_HTTP2" in str(e) or "ERR_CONNECTION" in str(e) or "Timeout" in str(e):
                 raise
             logger.error("Jet2 Playwright error: %s", e)
             return self._empty(req)
@@ -637,6 +693,45 @@ class Jet2ConnectorClient:
             return data
         except Exception as e:
             logger.debug("Jet2: direct API fetch failed: %s", e)
+            return None
+
+    async def _try_in_browser_html_fetch(
+        self, page, req: FlightSearchRequest, origin_slug: str, dest_slug: str,
+    ) -> Optional[list[FlightOffer]]:
+        """Fetch cheap-flights HTML via page.evaluate(fetch) to bypass PX on navigation."""
+        dep = req.date_from.strftime("%Y-%m-%d")
+        children_param = f"children={req.children}" if req.children > 0 else "children"
+        path = (
+            f"/en/cheap-flights/{origin_slug}/{dest_slug}"
+            f"?from={dep}&to={dep}"
+            f"&adults={req.adults}&{children_param}&infants={req.infants}"
+            f"&preselect=false"
+        )
+        try:
+            html = await page.evaluate("""async (path) => {
+                try {
+                    const resp = await fetch(path, {
+                        headers: {
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                            'Accept-Language': 'en-GB,en;q=0.9',
+                        },
+                        credentials: 'same-origin',
+                    });
+                    if (!resp.ok) return null;
+                    return await resp.text();
+                } catch { return null; }
+            }""", path)
+            if not html:
+                return None
+            if "Access Denied" in html or "PerimeterX" in html:
+                logger.warning("Jet2: PX block on in-browser HTML fetch")
+                return None
+            offers = self._parse_html_prices(html, req)
+            if offers is not None:
+                logger.info("Jet2: in-browser HTML fetch returned %d offers", len(offers))
+            return offers
+        except Exception as e:
+            logger.debug("Jet2: in-browser HTML fetch failed: %s", e)
             return None
 
     # ── Overlay / cookie dismissal ─────────────────────────────────────
