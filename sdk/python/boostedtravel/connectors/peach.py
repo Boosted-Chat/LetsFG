@@ -1,19 +1,22 @@
 """
-Peach Aviation CDP Chrome scraper — direct booking URL + DOM extraction.
+Peach Aviation CDP Chrome scraper — API interception + DOM extraction fallback.
 
 Peach Aviation (IATA: MM) is a Japanese LCC (ANA group).
 Booking site: booking.flypeach.com
 
-Strategy (converted Mar 2026):
+Strategy (updated Mar 2026):
 1. Launch real system Chrome via CDP (persistent, survives across searches)
-2. Build direct search URL with JSON params (bypasses homepage form)
-3. Navigate to booking.flypeach.com/en/getsearch?s=[params]
-4. Click "Search by One-way" to submit
-5. Extract flight data from server-rendered DOM
-6. Parse → FlightOffer objects
+2. Set up API response interception to capture flight JSON from XHR calls
+3. Build direct search URL with JSON params (bypasses homepage form)
+4. Navigate to booking.flypeach.com/en/getsearch?s=[params]
+5. Click "Search by One-way" to submit
+6. If API interception captured JSON flight data → parse directly
+7. Fallback: extract flight data from server-rendered DOM
+8. Parse → FlightOffer objects
 
 Real Chrome passes reCAPTCHA better than Playwright's bundled Chromium.
 Persistent browser avoids ~5s launch overhead per search.
+API interception is faster and more reliable than DOM extraction alone.
 """
 
 from __future__ import annotations
@@ -23,12 +26,13 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import time
 import urllib.parse
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 from boostedtravel.models.flights import (
     FlightOffer,
@@ -119,9 +123,9 @@ async def _get_browser():
 
 
 class PeachConnectorClient:
-    """Peach Aviation scraper — direct booking URL + DOM extraction."""
+    """Peach Aviation scraper — API interception + DOM extraction fallback."""
 
-    def __init__(self, timeout: float = 45.0):
+    def __init__(self, timeout: float = 60.0):
         self.timeout = timeout
 
     async def close(self):
@@ -135,44 +139,114 @@ class PeachConnectorClient:
         try:
             page = await context.new_page()
 
+            # ── API response interception ──────────────────────────────
+            api_event = asyncio.Event()
+            all_captured: list[Any] = []
+
+            async def on_response(response):
+                try:
+                    url = response.url.lower()
+                    if response.status == 200 and (
+                        "flight_search" in url
+                        or "availability" in url
+                        or "search_result" in url
+                        or "/api/" in url
+                        or "flights" in url
+                        or "fare" in url
+                        or "low_fare" in url
+                        or ("flypeach.com" in url and "search" in url)
+                    ):
+                        ct = response.headers.get("content-type", "")
+                        if "json" in ct or "javascript" in ct:
+                            data = await response.json()
+                            if data and isinstance(data, (dict, list)):
+                                logger.debug(
+                                    "Peach API intercept: url=%s keys=%s",
+                                    response.url[:120],
+                                    list(data.keys())[:10] if isinstance(data, dict) else f"list[{len(data)}]",
+                                )
+                                all_captured.append(data)
+                                api_event.set()
+                except Exception:
+                    pass
+
+            page.on("response", on_response)
+
             search_url = self._build_search_url(req)
             logger.info("Peach: navigating to booking URL for %s→%s on %s",
                         req.origin, req.destination, req.date_from.strftime("%Y/%m/%d"))
 
-            # Step 1: Navigate to getsearch URL to set session data (origin/dest/date)
-            await page.goto(search_url, wait_until="domcontentloaded",
-                            timeout=int(self.timeout * 1000))
-            await asyncio.sleep(1.5)
+            # Step 1: Navigate to getsearch URL to set session data
+            # Use full timeout — the site can be slow to respond
+            nav_timeout = int(self.timeout * 1000)
+            for attempt in range(2):
+                try:
+                    await page.goto(search_url, wait_until="domcontentloaded",
+                                    timeout=nav_timeout)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        logger.warning("Peach: first navigation attempt failed (%s), retrying…", e)
+                        await asyncio.sleep(random.uniform(1.0, 3.0))
+                    else:
+                        raise
+            await asyncio.sleep(random.uniform(1.0, 2.0))
 
             # Step 2: Navigate to the search form page (pre-filled from session)
             await page.goto("https://booking.flypeach.com/en/search",
-                            wait_until="domcontentloaded", timeout=15000)
-            await asyncio.sleep(1.5)
+                            wait_until="domcontentloaded", timeout=nav_timeout)
+            await asyncio.sleep(random.uniform(1.0, 2.0))
 
-            # Step 3: Click "Search by One-way" to submit — bypasses reCAPTCHA entirely
+            # Step 3: Click "Search by One-way" to submit — bypasses reCAPTCHA
             try:
                 one_way_link = page.get_by_role("link", name=re.compile(r"Search by One-way", re.IGNORECASE))
-                await one_way_link.click(timeout=10000)
+                await one_way_link.click(timeout=15000)
                 logger.info("Peach: clicked 'Search by One-way'")
             except Exception as e:
-                logger.warning("Peach: could not click one-way search (%s)", e)
-                return self._empty(req)
+                logger.warning("Peach: could not click one-way search (%s), trying alternate selectors", e)
+                # Fallback: try other selectors for the one-way search button
+                try:
+                    alt = page.locator("a:has-text('One-way'), button:has-text('One-way'), [data-testid*='one-way']").first
+                    await alt.click(timeout=10000)
+                    logger.info("Peach: clicked one-way via fallback selector")
+                except Exception:
+                    logger.warning("Peach: all one-way click attempts failed")
+                    return self._empty(req)
 
             # Wait for flight results page
             try:
-                await page.wait_for_url("**/flight_search**", timeout=20000)
+                await page.wait_for_url("**/flight_search**", timeout=30000)
                 logger.info("Peach: reached flight_search page")
             except Exception:
                 if "flight_search" not in page.url:
                     logger.warning("Peach: did not reach flight_search (at %s)", page.url)
                     return self._empty(req)
 
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(random.uniform(2.0, 3.0))
 
-            flights_data = await self._extract_flights_from_dom(page)
+            # ── Try API-intercepted data first ─────────────────────────
+            flights_data = None
+            if all_captured:
+                logger.info("Peach: intercepted %d API responses, parsing…", len(all_captured))
+                flights_data = self._parse_api_responses(all_captured)
+
+            # ── Fallback: DOM extraction ───────────────────────────────
+            if not flights_data:
+                # Wait briefly for any late API responses
+                try:
+                    await asyncio.wait_for(api_event.wait(), timeout=3.0)
+                except asyncio.TimeoutError:
+                    pass
+
+                if all_captured:
+                    flights_data = self._parse_api_responses(all_captured)
+
+                if not flights_data:
+                    logger.info("Peach: no API data captured, falling back to DOM extraction")
+                    flights_data = await self._extract_flights_from_dom(page)
 
             if not flights_data:
-                logger.warning("Peach: no flights extracted from DOM")
+                logger.warning("Peach: no flights extracted")
                 return self._empty(req)
 
             elapsed = time.monotonic() - t0
@@ -205,6 +279,160 @@ class PeachConnectorClient:
         json_str = json.dumps(params, separators=(",", ":"))
         encoded = urllib.parse.quote(json_str)
         return f"https://booking.flypeach.com/en/getsearch?s={encoded}"
+
+    # ------------------------------------------------------------------
+    # API response parsing
+    # ------------------------------------------------------------------
+
+    def _parse_api_responses(self, captured: list[Any]) -> list[dict]:
+        """Parse flight data from intercepted API JSON responses.
+
+        Peach's booking site may return flight data in various JSON
+        structures depending on the endpoint.  We look for common keys
+        (flights, journeys, itineraries, segments, departure/arrival
+        times, prices) and normalise to the same dict format used by
+        DOM extraction.
+        """
+        flights: list[dict] = []
+        seen: set[str] = set()
+
+        for data in captured:
+            try:
+                items = self._extract_flights_from_json(data)
+                for f in items:
+                    key = f.get("flight_no", "") + "_" + f.get("dep_time", "")
+                    if key not in seen:
+                        seen.add(key)
+                        flights.append(f)
+            except Exception as exc:
+                logger.debug("Peach: could not parse captured response: %s", exc)
+
+        if flights:
+            logger.info("Peach: parsed %d flights from API interception", len(flights))
+        return flights
+
+    def _extract_flights_from_json(self, data: Any) -> list[dict]:
+        """Recursively search JSON for flight-like objects and normalise."""
+        results: list[dict] = []
+
+        if isinstance(data, list):
+            for item in data:
+                results.extend(self._extract_flights_from_json(item))
+            return results
+
+        if not isinstance(data, dict):
+            return results
+
+        # Try to detect a flight object — must have a flight number and times
+        flight_no = ""
+        for key in ("flightNumber", "flight_number", "flightNo", "flight_no",
+                     "designator", "identifier", "number"):
+            val = data.get(key)
+            if isinstance(val, str) and re.match(r"MM\d{2,4}$", val):
+                flight_no = val
+                break
+            if isinstance(val, dict):
+                for sub in ("identifier", "carrierCode", "flightNumber"):
+                    sv = val.get(sub, "")
+                    if isinstance(sv, str) and re.match(r"MM\d{2,4}$", sv):
+                        flight_no = sv
+                        break
+                carrier = val.get("carrierCode", "")
+                ident = val.get("identifier", "")
+                if carrier == "MM" and ident:
+                    flight_no = f"MM{ident}"
+
+        dep_time = ""
+        arr_time = ""
+        for dk in ("departure", "departureTime", "departure_time", "std",
+                    "dep_time", "departureDate"):
+            v = data.get(dk, "")
+            if isinstance(v, str) and v:
+                m = re.search(r"(\d{2}:\d{2})", v)
+                if m:
+                    dep_time = m.group(1)
+                    break
+        for ak in ("arrival", "arrivalTime", "arrival_time", "sta",
+                    "arr_time", "arrivalDate"):
+            v = data.get(ak, "")
+            if isinstance(v, str) and v:
+                m = re.search(r"(\d{2}:\d{2})", v)
+                if m:
+                    arr_time = m.group(1)
+                    break
+
+        # Check nested designator (common in Navitaire/LCC systems)
+        designator = data.get("designator", {})
+        if isinstance(designator, dict):
+            if not dep_time:
+                dv = designator.get("departure", "")
+                if isinstance(dv, str):
+                    m = re.search(r"(\d{2}:\d{2})", dv)
+                    if m:
+                        dep_time = m.group(1)
+            if not arr_time:
+                av = designator.get("arrival", "")
+                if isinstance(av, str):
+                    m = re.search(r"(\d{2}:\d{2})", av)
+                    if m:
+                        arr_time = m.group(1)
+
+        # Extract prices
+        prices: list[int] = []
+        for pk in ("price", "amount", "totalPrice", "total_price", "fare",
+                    "basePrice", "adultFare"):
+            v = data.get(pk)
+            if isinstance(v, (int, float)) and v > 0:
+                prices.append(int(v))
+
+        # Check nested fares/prices arrays
+        for fk in ("fares", "fareAvailabilities", "prices", "farePrices"):
+            farr = data.get(fk)
+            if isinstance(farr, list):
+                for fi in farr:
+                    if isinstance(fi, dict):
+                        for ppk in ("price", "amount", "total", "fareAmount",
+                                     "adultFare", "passengerFare"):
+                            pv = fi.get(ppk)
+                            if isinstance(pv, (int, float)) and pv > 0:
+                                prices.append(int(pv))
+
+        # Duration
+        duration_mins = 0
+        for dur_key in ("duration", "flightDuration", "segmentDuration",
+                        "totalDuration"):
+            dv = data.get(dur_key, "")
+            if isinstance(dv, (int, float)) and dv > 0:
+                # Could be minutes or seconds
+                duration_mins = int(dv) if dv < 1440 else int(dv / 60)
+                break
+            if isinstance(dv, str):
+                hm = re.search(r"(\d+)[Hh:](\d+)", dv)
+                if hm:
+                    duration_mins = int(hm.group(1)) * 60 + int(hm.group(2))
+                    break
+
+        if flight_no and dep_time and arr_time:
+            results.append({
+                "flight_no": flight_no,
+                "aircraft": data.get("aircraft", data.get("equipmentType", "")),
+                "dep_time": dep_time,
+                "arr_time": arr_time,
+                "duration_mins": duration_mins,
+                "prices": prices,
+                "seats": [],
+            })
+            return results
+
+        # Recurse into child arrays/dicts that may contain flights
+        for key in ("flights", "journeys", "segments", "itineraries",
+                     "schedules", "results", "data", "outbound",
+                     "departureRouteList", "trips", "legs"):
+            child = data.get(key)
+            if isinstance(child, (list, dict)):
+                results.extend(self._extract_flights_from_json(child))
+
+        return results
 
     # ------------------------------------------------------------------
     # DOM extraction
