@@ -148,7 +148,7 @@ async def _get_browser():
 
 async def _reset_browser():
     """Close and reset browser (used when PX blocks the session)."""
-    global _pw_instance, _browser, _chrome_proc
+    global _browser, _chrome_proc
     lock = _get_lock()
     async with lock:
         if _browser:
@@ -167,7 +167,6 @@ async def _reset_browser():
                 except Exception:
                     pass
             _chrome_proc = None
-        _pw_instance = None
 
 
 class Jet2ConnectorClient:
@@ -552,9 +551,7 @@ class Jet2ConnectorClient:
                 # Also extract cookies for future curl_cffi use
                 cookies = await context.cookies()
                 if cookies:
-                    global _farmed_cookies, _farm_timestamp
-                    _farmed_cookies = cookies
-                    _farm_timestamp = time.monotonic()
+                    self._cache_cookies(cookies)
 
                 # Check if flight exists on target date
                 year_str = str(req.date_from.year)
@@ -596,6 +593,13 @@ class Jet2ConnectorClient:
             offers=offers,
             total_results=len(offers),
         )
+
+    @staticmethod
+    def _cache_cookies(cookies: list[dict]) -> None:
+        """Cache farmed cookies for future curl_cffi use."""
+        global _farmed_cookies, _farm_timestamp
+        _farmed_cookies = cookies
+        _farm_timestamp = time.monotonic()
 
     # ------------------------------------------------------------------
     # Playwright fallback (full browser flow, used if API fails)
