@@ -161,7 +161,7 @@ class AirAsiaConnectorClient:
             )
             _FLIGHT_KEYS = frozenset({
                 "searchResults", "trips", "flights", "journeys",
-                "outboundFlights", "availability", "data", "results",
+                "outboundFlights", "availability",
                 "lowFareAvailability", "outbound", "fares", "flightsList",
                 "offers", "airBoundGroups",
             })
