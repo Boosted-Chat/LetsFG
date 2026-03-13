@@ -1,27 +1,26 @@
 """
-Scoot Playwright scraper — CDP Chrome + API interception via Navitaire Angular SPA.
+Scoot hybrid scraper — curl_cffi direct Navitaire API + cookie-farm fallback.
 
 Scoot (IATA: TR) is Singapore Airlines' low-cost subsidiary operating from SIN.
-Uses a modern Navitaire Angular 20 booking engine at booking.flyscoot.com.
-Protected by Akamai Bot Manager — requires real Chrome via CDP bypass.
+Uses a Navitaire New Skies booking engine at booking.flyscoot.com.
+Protected by Akamai Bot Manager — curl_cffi bypasses TLS fingerprint checks.
 
-Strategy:
-1. Launch real Chrome via subprocess + connect via CDP (port 9448) to bypass
-   Akamai bot challenge that blocks Playwright's bundled Chromium
-2. Visit www.flyscoot.com/en first — Akamai warmup grants clearance cookies
-3. Navigate to booking.flyscoot.com — Angular SPA loads with search form
-4. Accept cookie consent banner
-5. Fill search form via #originStation, #destinationStation, #departureDate
-6. Set one-way mode, click "Let's Go!" submit button
-7. Intercept the flight availability API response
-8. Parse Navitaire Trips[].Flights[] structure with fare bundles for prices
-9. Fallback: DOM extraction from flight result cards
+Strategy (hybrid curl_cffi + cookie-farm):
+1. FAST PATH (~1-3s): curl_cffi (impersonate=chrome124) to:
+   a. Bootstrap anonymous Navitaire session (JWT token)
+   b. POST availability search API
+   c. Parse Navitaire trips/journeys/fares response
+2. COOKIE FARM (~15-25s): If direct API fails, Playwright opens booking site,
+   intercepts the JWT + Akamai _abck cookies, then curl_cffi replays.
+3. PLAYWRIGHT FALLBACK: Full browser with form fill + API interception.
 
 Key API structure (Mar 2026):
-  Session: GET /api/v1/account/anonymous  → JWT token
+  Token endpoints (tried in order):
+    POST https://booking.flyscoot.com/api/nsk/v1/token
+    GET  https://booking.flyscoot.com/api/v1/account/anonymous
+  Search endpoint:
+    POST https://booking.flyscoot.com/api/nsk/v4/availability/search
   Auth headers: Authorization: <JWT>, x-scoot-appsource: IBE-WEB
-  Stations: GET /api/flights/resource/stations?cultureCode=en-sg
-  Search: intercepted after form submit (POST availability endpoint)
 """
 
 from __future__ import annotations
@@ -30,13 +29,12 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 import random
-import re
-import subprocess
 import time
 from datetime import datetime
 from typing import Any, Optional
+
+from curl_cffi import requests as cffi_requests
 
 from boostedtravel.models.flights import (
     FlightOffer,
@@ -45,10 +43,11 @@ from boostedtravel.models.flights import (
     FlightSearchResponse,
     FlightSegment,
 )
-from boostedtravel.connectors.browser import stealth_args, stealth_position_arg, stealth_popen_kwargs
+from boostedtravel.connectors.browser import stealth_args
 
 logger = logging.getLogger(__name__)
 
+# ── Anti-fingerprint pools ─────────────────────────────────────────────────
 _VIEWPORTS = [
     {"width": 1366, "height": 768},
     {"width": 1440, "height": 900},
@@ -62,179 +61,402 @@ _TIMEZONES = [
     "Asia/Tokyo", "Australia/Sydney",
 ]
 
+_BOOKING_BASE = "https://booking.flyscoot.com"
+_TOKEN_ENDPOINTS = [
+    ("POST", f"{_BOOKING_BASE}/api/nsk/v1/token"),
+    ("GET", f"{_BOOKING_BASE}/api/v1/account/anonymous"),
+]
+_AVAIL_ENDPOINT = f"{_BOOKING_BASE}/api/nsk/v4/availability/search"
+_AVAIL_ENDPOINTS_ALT = [
+    f"{_BOOKING_BASE}/api/v2/availability",
+    f"{_BOOKING_BASE}/api/nsk/v3/availability/search",
+]
+_IMPERSONATE = "chrome124"
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+)
+_COOKIE_MAX_AGE = 25 * 60  # Re-farm cookies after 25 minutes
 _MAX_ATTEMPTS = 2
-_DEBUG_PORT = 9448
-_USER_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".scoot_chrome_data")
 
+# ── Shared cookie-farm state ──────────────────────────────────────────────
+_farm_lock: Optional[asyncio.Lock] = None
+_farmed_token: str = ""
+_farmed_cookies: list[dict] = []
+_farm_timestamp: float = 0.0
 _pw_instance = None
 _browser = None
-_chrome_proc = None
-_browser_lock: Optional[asyncio.Lock] = None
 
 
-def _find_chrome() -> Optional[str]:
-    """Find Chrome executable on the system."""
-    candidates = [
-        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
-        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
-        os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/chromium-browser",
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    ]
-    for c in candidates:
-        if os.path.isfile(c):
-            return c
-    return None
-
-
-def _get_lock() -> asyncio.Lock:
-    global _browser_lock
-    if _browser_lock is None:
-        _browser_lock = asyncio.Lock()
-    return _browser_lock
+def _get_farm_lock() -> asyncio.Lock:
+    global _farm_lock
+    if _farm_lock is None:
+        _farm_lock = asyncio.Lock()
+    return _farm_lock
 
 
 async def _get_browser():
-    """Launch real Chrome via subprocess + connect via CDP.
-
-    Uses a persistent user-data-dir so Akamai clearance persists across runs.
-    Falls back to regular Playwright launch if Chrome is not found.
-    """
-    global _pw_instance, _browser, _chrome_proc
-    lock = _get_lock()
-    async with lock:
-        if _browser:
-            try:
-                if _browser.is_connected():
-                    return _browser
-            except Exception:
-                pass
-
-        from playwright.async_api import async_playwright
-
-        if _pw_instance:
-            try:
-                await _pw_instance.stop()
-            except Exception:
-                pass
-        _pw_instance = await async_playwright().start()
-
-        chrome_path = _find_chrome()
-        if chrome_path:
-            os.makedirs(_USER_DATA_DIR, exist_ok=True)
-            # Try connecting to existing Chrome first
-            try:
-                _browser = await _pw_instance.chromium.connect_over_cdp(
-                    f"http://localhost:{_DEBUG_PORT}"
-                )
-                logger.info("Scoot: connected to existing Chrome via CDP")
-                return _browser
-            except Exception:
-                pass
-
-            vp = random.choice(_VIEWPORTS)
-            _chrome_proc = subprocess.Popen(
-                [
-                    chrome_path,
-                    f"--remote-debugging-port={_DEBUG_PORT}",
-                    f"--user-data-dir={_USER_DATA_DIR}",
-                    f"--window-size={vp['width']},{vp['height']}",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--disable-background-networking",
-                    *stealth_position_arg(),
-                    "about:blank",
-                ],
-                **stealth_popen_kwargs(),
-            )
-            await asyncio.sleep(2.5)
-            try:
-                _browser = await _pw_instance.chromium.connect_over_cdp(
-                    f"http://localhost:{_DEBUG_PORT}"
-                )
-                logger.info("Scoot: connected to real Chrome via CDP (port %d)", _DEBUG_PORT)
-                return _browser
-            except Exception as e:
-                logger.warning("Scoot: CDP connect failed: %s, falling back", e)
-                if _chrome_proc:
-                    _chrome_proc.terminate()
-                    _chrome_proc = None
-
-        # Fallback: regular Playwright headed Chrome
-        try:
-            _browser = await _pw_instance.chromium.launch(
-                headless=True, channel="chrome",
-                args=["--disable-blink-features=AutomationControlled", *stealth_args()],
-            )
-        except Exception:
-            _browser = await _pw_instance.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox", *stealth_args()],
-            )
-        logger.info("Scoot: Playwright browser launched (headed Chrome, fallback)")
+    """Shared headed Chromium for cookie farming (launched once, reused)."""
+    global _pw_instance, _browser
+    if _browser and _browser.is_connected():
         return _browser
+    from boostedtravel.connectors.browser import launch_headed_browser
+    _browser = await launch_headed_browser()
+    logger.info("Scoot: browser launched for cookie farming")
+    return _browser
 
 
 class ScootConnectorClient:
-    """Scoot Playwright scraper — CDP Chrome + Navitaire API interception."""
+    """Scoot hybrid scraper — curl_cffi direct Navitaire API + cookie-farm."""
 
-    def __init__(self, timeout: float = 50.0):
+    def __init__(self, timeout: float = 45.0):
         self.timeout = timeout
 
     async def close(self):
-        pass
+        pass  # Browser is shared singleton
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        """
+        Search Scoot flights via hybrid curl_cffi + cookie-farm.
+
+        Fast path (~1-3s): curl_cffi direct to Navitaire API.
+        Cookie farm (~15-25s): Playwright farms JWT + cookies, curl_cffi replays.
+        Fallback: Full Playwright browser interception.
+        """
         t0 = time.monotonic()
 
-        for attempt in range(1, _MAX_ATTEMPTS + 1):
-            try:
-                offers = await self._attempt_search(req, t0)
-                if offers is not None:
-                    elapsed = time.monotonic() - t0
-                    return self._build_response(offers, req, elapsed)
-                logger.warning("Scoot: attempt %d/%d got no results", attempt, _MAX_ATTEMPTS)
-            except Exception as e:
-                logger.warning("Scoot: attempt %d/%d error: %s", attempt, _MAX_ATTEMPTS, e)
-
-        return self._empty(req)
-
-    async def _attempt_search(self, req: FlightSearchRequest, t0: float) -> Optional[list[FlightOffer]]:
-        browser = await _get_browser()
-
-        # CDP browsers use default context — reuse existing tab to keep cookies
-        is_cdp = hasattr(browser, 'contexts') and browser.contexts
-        if is_cdp:
-            context = browser.contexts[0]
-            # Close extra tabs, use the first page (avoids Akamai issues with new tabs)
-            for p in context.pages[1:]:
-                try:
-                    await p.close()
-                except Exception:
-                    pass
-            if context.pages:
-                page = context.pages[0]
+        try:
+            # Fast path: try direct API (may work without cookies)
+            data = await self._api_search(req, token="", cookies=[])
+            if data:
+                logger.info("Scoot: cookieless API succeeded")
             else:
-                page = await context.new_page()
-        else:
-            context = await browser.new_context(
-                viewport=random.choice(_VIEWPORTS),
-                locale=random.choice(_LOCALES),
-                timezone_id=random.choice(_TIMEZONES),
-                service_workers="block",
+                # Try with farmed session
+                token, cookies = await self._ensure_session(req)
+                if token or cookies:
+                    data = await self._api_search(req, token=token, cookies=cookies)
+
+                # Re-farm once if stale
+                if data is None and (token or cookies):
+                    logger.info("Scoot: API failed with farmed session, re-farming")
+                    token, cookies = await self._farm_session(req)
+                    if token or cookies:
+                        data = await self._api_search(req, token=token, cookies=cookies)
+
+                # Last resort: full Playwright
+                if not data:
+                    logger.warning("Scoot: API returned no data, falling back to Playwright")
+                    return await self._playwright_fallback(req, t0)
+
+            elapsed = time.monotonic() - t0
+            offers = self._parse_navitaire_response(data, req)
+            if not offers:
+                offers = self._parse_flat_response(data, req)
+            offers.sort(key=lambda o: o.price)
+
+            logger.info(
+                "Scoot %s→%s returned %d offers in %.1fs (hybrid API)",
+                req.origin, req.destination, len(offers), elapsed,
             )
-            page = await context.new_page()
+
+            search_hash = hashlib.md5(
+                f"scoot{req.origin}{req.destination}{req.date_from}".encode()
+            ).hexdigest()[:12]
+
+            return FlightSearchResponse(
+                search_id=f"fs_{search_hash}",
+                origin=req.origin,
+                destination=req.destination,
+                currency=offers[0].currency if offers else (req.currency or "SGD"),
+                offers=offers,
+                total_results=len(offers),
+            )
+
+        except Exception as e:
+            logger.error("Scoot hybrid error: %s", e)
+            return self._empty(req)
+
+    # ------------------------------------------------------------------
+    # Direct API via curl_cffi
+    # ------------------------------------------------------------------
+
+    async def _api_search(
+        self, req: FlightSearchRequest, *, token: str, cookies: list[dict],
+    ) -> Optional[dict]:
+        """POST Navitaire availability search via curl_cffi."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self._api_search_sync, req, token, cookies,
+        )
+
+    def _api_search_sync(
+        self, req: FlightSearchRequest, token: str, cookies: list[dict],
+    ) -> Optional[dict]:
+        """Synchronous curl_cffi Navitaire availability search."""
+        # Bootstrap token if not provided
+        if not token:
+            token = self._bootstrap_token_sync(cookies)
+        if not token and not cookies:
+            return None  # No credentials at all
+
+        sess = cffi_requests.Session(impersonate=_IMPERSONATE)
+        for c in cookies:
+            domain = c.get("domain", "")
+            sess.cookies.set(c["name"], c["value"], domain=domain)
+
+        dep = req.date_from.strftime("%Y-%m-%dT00:00:00")
+        body = {
+            "criteria": [{
+                "stations": {
+                    "originStationCodes": [req.origin],
+                    "destinationStationCodes": [req.destination],
+                    "searchOriginMacs": True,
+                    "searchDestinationMacs": True,
+                },
+                "dates": {
+                    "beginDate": dep,
+                    "endDate": dep,
+                },
+                "filters": {
+                    "compressionType": "ROUND_TRIP",
+                    "maxConnections": -1,
+                },
+                "passengers": {
+                    "types": self._build_passenger_types(req),
+                },
+            }],
+            "codes": {
+                "currencyCode": req.currency or "SGD",
+            },
+        }
+
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-SG,en;q=0.9",
+            "Content-Type": "application/json",
+            "Referer": f"{_BOOKING_BASE}/",
+            "Origin": _BOOKING_BASE,
+            "x-scoot-appsource": "IBE-WEB",
+        }
+        if token:
+            headers["Authorization"] = (
+                token if token.startswith("Bearer") else f"Bearer {token}"
+            )
+
+        # Try primary endpoint, then alternatives
+        for endpoint in [_AVAIL_ENDPOINT] + _AVAIL_ENDPOINTS_ALT:
+            try:
+                r = sess.post(
+                    endpoint,
+                    json=body,
+                    headers=headers,
+                    timeout=15,
+                )
+            except Exception as e:
+                logger.debug("Scoot: API request to %s failed: %s", endpoint, e)
+                continue
+
+            if r.status_code == 403:
+                logger.debug("Scoot: 403 from %s (Akamai block)", endpoint)
+                continue
+            if r.status_code not in (200, 201):
+                logger.debug("Scoot: %d from %s", r.status_code, endpoint)
+                continue
+
+            try:
+                data = r.json()
+            except Exception:
+                continue
+
+            # Validate we got actual flight data
+            if isinstance(data, dict):
+                if data.get("trips") or data.get("data", {}).get("trips"):
+                    return data
+                if data.get("journeys") or data.get("faresAvailable"):
+                    return data
+
+        return None
+
+    def _bootstrap_token_sync(self, cookies: list[dict]) -> str:
+        """Get anonymous Navitaire JWT token via curl_cffi."""
+        sess = cffi_requests.Session(impersonate=_IMPERSONATE)
+        for c in cookies:
+            sess.cookies.set(c["name"], c["value"], domain=c.get("domain", ""))
+
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-SG,en;q=0.9",
+            "Content-Type": "application/json",
+            "Referer": f"{_BOOKING_BASE}/",
+            "Origin": _BOOKING_BASE,
+            "x-scoot-appsource": "IBE-WEB",
+        }
+
+        for method, url in _TOKEN_ENDPOINTS:
+            try:
+                if method == "POST":
+                    r = sess.post(
+                        url,
+                        json={"applicationName": "IBE-WEB"},
+                        headers=headers,
+                        timeout=10,
+                    )
+                else:
+                    r = sess.get(url, headers=headers, timeout=10)
+
+                if r.status_code == 200:
+                    data = r.json()
+                    token = ""
+                    if isinstance(data, dict):
+                        token = (
+                            data.get("token", "")
+                            or data.get("data", {}).get("token", "")
+                            or data.get("accessToken", "")
+                            or data.get("id_token", "")
+                        )
+                    elif isinstance(data, str) and data:
+                        token = data
+                    if token:
+                        logger.info("Scoot: got JWT token from %s", url)
+                        return token
+            except Exception as e:
+                logger.debug("Scoot: token from %s failed: %s", url, e)
+                continue
+
+        return ""
+
+    @staticmethod
+    def _build_passenger_types(req: FlightSearchRequest) -> list[dict]:
+        """Build Navitaire passenger types array."""
+        types = [{"type": "ADT", "count": req.adults or 1}]
+        if req.children:
+            types.append({"type": "CHD", "count": req.children})
+        if req.infants:
+            types.append({"type": "INF", "count": req.infants})
+        return types
+
+    # ------------------------------------------------------------------
+    # Cookie + token farm — Playwright generates session
+    # ------------------------------------------------------------------
+
+    async def _ensure_session(
+        self, req: FlightSearchRequest,
+    ) -> tuple[str, list[dict]]:
+        """Return valid farmed token + cookies, farming new ones if needed."""
+        global _farmed_token, _farmed_cookies, _farm_timestamp
+        lock = _get_farm_lock()
+        async with lock:
+            age = time.monotonic() - _farm_timestamp
+            if _farmed_cookies and age < _COOKIE_MAX_AGE:
+                return _farmed_token, _farmed_cookies
+            return await self._farm_session(req)
+
+    async def _farm_session(
+        self, req: FlightSearchRequest,
+    ) -> tuple[str, list[dict]]:
+        """Open Playwright, visit booking site, extract JWT + Akamai cookies."""
+        global _farmed_token, _farmed_cookies, _farm_timestamp
+
+        browser = await _get_browser()
+        context = await browser.new_context(
+            viewport=random.choice(_VIEWPORTS),
+            locale=random.choice(_LOCALES),
+            timezone_id=random.choice(_TIMEZONES),
+            service_workers="block",
+        )
 
         try:
             try:
                 from playwright_stealth import stealth_async
+                page = await context.new_page()
                 await stealth_async(page)
             except ImportError:
-                pass
+                page = await context.new_page()
 
-            # API response capture — only listen after search button is clicked
+            token_found = {"value": ""}
+
+            async def on_response(response):
+                try:
+                    url = response.url.lower()
+                    ct = response.headers.get("content-type", "")
+                    if response.status != 200 or "json" not in ct:
+                        return
+                    # Capture JWT token from token/auth endpoints
+                    if "token" in url or "anonymous" in url or "auth" in url:
+                        data = await response.json()
+                        t = ""
+                        if isinstance(data, dict):
+                            t = (
+                                data.get("token", "")
+                                or data.get("data", {}).get("token", "")
+                                or data.get("accessToken", "")
+                                or data.get("id_token", "")
+                            )
+                        elif isinstance(data, str):
+                            t = data
+                        if t:
+                            token_found["value"] = t
+                            logger.info("Scoot: farmed JWT from %s", response.url[:80])
+                except Exception:
+                    pass
+
+            page.on("response", on_response)
+
+            logger.info("Scoot: farming session via booking.flyscoot.com")
+            await page.goto(
+                f"{_BOOKING_BASE}/",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await asyncio.sleep(5)
+
+            # Dismiss cookie consent
+            await self._dismiss_cookies(page)
+
+            # Wait for SPA to load and fire token request
+            await asyncio.sleep(5)
+
+            # Extract cookies regardless of token capture
+            cookies = await context.cookies()
+            _farmed_cookies = cookies
+            _farmed_token = token_found["value"]
+            _farm_timestamp = time.monotonic()
+            logger.info(
+                "Scoot: farmed %d cookies, token=%s",
+                len(cookies), "yes" if _farmed_token else "no",
+            )
+            return _farmed_token, cookies
+
+        except Exception as e:
+            logger.error("Scoot: session farm error: %s", e)
+            return "", []
+        finally:
+            await context.close()
+
+    # ------------------------------------------------------------------
+    # Playwright fallback (full browser flow)
+    # ------------------------------------------------------------------
+
+    async def _playwright_fallback(
+        self, req: FlightSearchRequest, t0: float,
+    ) -> FlightSearchResponse:
+        """Full Playwright browser with form fill + API interception."""
+        browser = await _get_browser()
+        context = await browser.new_context(
+            viewport=random.choice(_VIEWPORTS),
+            locale=random.choice(_LOCALES),
+            timezone_id=random.choice(_TIMEZONES),
+            service_workers="block",
+        )
+
+        try:
+            try:
+                from playwright_stealth import stealth_async
+                page = await context.new_page()
+                await stealth_async(page)
+            except ImportError:
+                page = await context.new_page()
+
             captured_data: dict = {}
             api_event = asyncio.Event()
             search_clicked = {"ready": False}
@@ -244,13 +466,11 @@ class ScootConnectorClient:
                     return
                 try:
                     url = response.url.lower()
-                    status = response.status
-                    if status != 200:
+                    if response.status != 200:
                         return
                     ct = response.headers.get("content-type", "")
                     if "json" not in ct:
                         return
-                    # Match search/availability endpoints, skip lowfare (both /estimate and direct)
                     if "lowfare" in url:
                         return
                     if any(k in url for k in [
@@ -263,35 +483,28 @@ class ScootConnectorClient:
                             captured_data["search"] = data
                             captured_data["search_url"] = response.url
                             api_event.set()
-                            logger.info("Scoot: captured search API from %s",
-                                        response.url[:100])
+                            logger.info(
+                                "Scoot: captured search API from %s",
+                                response.url[:100],
+                            )
                 except Exception:
                     pass
 
             page.on("response", on_response)
 
-            # Step 1: Akamai warmup via www.flyscoot.com
-            logger.info("Scoot: Akamai warmup via www.flyscoot.com")
-            try:
-                await page.goto("https://www.flyscoot.com/en",
-                                wait_until="domcontentloaded", timeout=15000)
-                await asyncio.sleep(3)
-                await self._dismiss_cookies(page)
-            except Exception:
-                pass  # main site may timeout — we just need the cookies
-
-            # Step 2: Navigate to booking engine
-            logger.info("Scoot: loading booking.flyscoot.com for %s->%s",
-                        req.origin, req.destination)
-            await page.goto("https://booking.flyscoot.com",
-                            wait_until="domcontentloaded", timeout=20000)
+            logger.info(
+                "Scoot: Playwright fallback for %s→%s",
+                req.origin, req.destination,
+            )
+            await page.goto(
+                f"{_BOOKING_BASE}/",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
             await asyncio.sleep(5)
-
-            # Accept cookies on booking site too
             await self._dismiss_cookies(page)
 
-            # Wait for SPA to render (use JS to check for visible input — avoids
-            # the duplicate-ID trap where wait_for_selector picks the hidden one)
+            # Wait for SPA to render search form
             spa_ready = False
             for _wait_round in range(6):  # up to ~30s total
                 spa_ready = await page.evaluate("""() => {
@@ -302,71 +515,71 @@ class ScootConnectorClient:
                     break
                 await asyncio.sleep(5)
             if not spa_ready:
-                logger.warning("Scoot: search form never appeared")
-                return None
+                logger.warning("Scoot: search form never appeared (Playwright fallback)")
+                # Still update cookie farm from this session
+                global _farmed_cookies, _farm_timestamp
+                _farmed_cookies = await context.cookies()
+                _farm_timestamp = time.monotonic()
+                return self._empty(req)
 
-            # Step 3: Set one-way
+            # Fill form
             await self._set_one_way(page)
             await asyncio.sleep(0.5)
 
-            # Step 5: Fill origin
             ok = await self._fill_station(page, "#originStation", req.origin)
             if not ok:
-                logger.warning("Scoot: origin fill failed for %s", req.origin)
-                return None
+                return self._empty(req)
             await asyncio.sleep(0.5)
 
-            # Step 6: Fill destination
             ok = await self._fill_station(page, "#destinationStation", req.destination)
             if not ok:
-                logger.warning("Scoot: destination fill failed for %s", req.destination)
-                return None
+                return self._empty(req)
             await asyncio.sleep(0.5)
 
-            # Step 7: Fill date
             ok = await self._fill_date(page, req.date_from)
             if not ok:
-                logger.warning("Scoot: date fill failed")
-                return None
+                return self._empty(req)
             await asyncio.sleep(0.3)
 
-            # Step 8: Click search (enable API capture first)
+            # Submit search
             search_clicked["ready"] = True
             await self._click_search(page)
 
-            # Step 9: Wait for API response
+            # Wait for API response
             remaining = max(self.timeout - (time.monotonic() - t0), 10)
             try:
                 await asyncio.wait_for(api_event.wait(), timeout=remaining)
             except asyncio.TimeoutError:
-                logger.info("Scoot: API intercept timed out, trying DOM extraction")
+                logger.warning("Scoot: Playwright fallback timed out")
                 offers = await self._extract_from_dom(page, req)
                 if offers:
-                    return offers
-                offers = await self._extract_from_page_data(page, req)
-                return offers if offers else None
+                    elapsed = time.monotonic() - t0
+                    return self._build_response(offers, req, elapsed)
+                return self._empty(req)
+
+            # Update cookie farm from successful session
+            _farmed_cookies = await context.cookies()
+            _farm_timestamp = time.monotonic()
 
             data = captured_data.get("search")
-            if data:
-                offers = self._parse_navitaire_response(data, req)
-                if offers:
-                    return offers
+            if not data:
+                return self._empty(req)
 
-            # Fallback to DOM
-            return await self._extract_from_dom(page, req) or None
+            elapsed = time.monotonic() - t0
+            offers = self._parse_navitaire_response(data, req)
+            if not offers:
+                offers = self._parse_flat_response(data, req)
+            return self._build_response(offers, req, elapsed)
 
+        except Exception as e:
+            logger.error("Scoot Playwright fallback error: %s", e)
+            return self._empty(req)
         finally:
-            if is_cdp:
-                # Don't close the reused tab — just navigate away
-                try:
-                    await page.goto("about:blank", timeout=5000)
-                except Exception:
-                    pass
-            else:
-                await page.close()
-                await context.close()
+            await context.close()
 
-    # ── Cookie / overlay dismissal ──────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Form interaction helpers (for Playwright fallback)
+    # ------------------------------------------------------------------
 
     async def _dismiss_cookies(self, page) -> None:
         """Dismiss cookie consent and overlay banners."""
@@ -395,8 +608,6 @@ class ScootConnectorClient:
         except Exception:
             pass
 
-    # ── One-way toggle ──────────────────────────────────────────────────────
-
     async def _set_one_way(self, page) -> None:
         """Click One-Way radio/tab if not already selected."""
         try:
@@ -415,8 +626,6 @@ class ScootConnectorClient:
                     return
             except Exception:
                 continue
-
-    # ── Station (airport) fill ──────────────────────────────────────────────
 
     async def _fill_station(self, page, selector: str, iata: str) -> bool:
         """Fill an airport input (#originStation or #destinationStation).
@@ -521,15 +730,8 @@ class ScootConnectorClient:
             logger.warning("Scoot: station fill error for %s: %s", iata, e)
             return False
 
-    # ── Date fill ───────────────────────────────────────────────────────────
-
     async def _fill_date(self, page, target: datetime) -> bool:
-        """Fill the departure date using the ngb-datepicker calendar.
-
-        Calendar uses: div.ngb-dp-month-name ("March 2026"),
-        button[aria-label="Next month"], and
-        div.ngb-dp-day[role="gridcell"][aria-label="Thursday, April 9, 2026"].
-        """
+        """Fill the departure date using the ngb-datepicker calendar."""
         try:
             # Click the visible #departureDate to open the calendar
             opened = await page.evaluate("""() => {
@@ -555,7 +757,6 @@ class ScootConnectorClient:
                 }""")
                 if target_month_year in visible_months:
                     break
-                # Click "Next month"
                 try:
                     await page.locator(
                         "button[aria-label='Next month']"
@@ -565,12 +766,10 @@ class ScootConnectorClient:
                     logger.warning("Scoot: can't find Next month button")
                     break
 
-            # Build the aria-label for the target day, e.g. "Thursday, April 9, 2026"
-            # The calendar uses full day-of-week names
+            # Build the aria-label for the target day
             day_label = target.strftime("%A, %B ") + str(target.day) + target.strftime(", %Y")
 
-            # Click the day cell via JS — click the gridcell div directly
-            # (clicking the inner .custom-day span doesn't trigger Angular)
+            # Click the day cell via JS
             clicked = await page.evaluate("""(label) => {
                 const cells = document.querySelectorAll(
                     'div.ngb-dp-day[role="gridcell"]:not(.disabled)');
@@ -590,7 +789,7 @@ class ScootConnectorClient:
                 await self._close_calendar(page)
                 return True
 
-            # Fallback: match by day number within visible non-disabled cells
+            # Fallback: match by day number
             day_num = str(target.day)
             clicked2 = await page.evaluate("""(dayNum) => {
                 const cells = document.querySelectorAll(
@@ -636,8 +835,6 @@ class ScootConnectorClient:
         except Exception:
             pass
 
-    # ── Search submit ───────────────────────────────────────────────────────
-
     async def _click_search(self, page) -> None:
         """Click the 'Let's Go!' search button via JS."""
         clicked = await page.evaluate("""() => {
@@ -665,7 +862,9 @@ class ScootConnectorClient:
             await page.keyboard.press("Enter")
             logger.info("Scoot: pressed Enter as search fallback")
 
-    # ── DOM extraction fallback ─────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # DOM extraction fallback
+    # ------------------------------------------------------------------
 
     async def _extract_from_dom(self, page, req: FlightSearchRequest) -> list[FlightOffer]:
         """Extract flight offers from DOM elements on the results page."""
@@ -751,7 +950,9 @@ class ScootConnectorClient:
         except Exception:
             return []
 
-    # ── Response parsing ────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Response parsing
+    # ------------------------------------------------------------------
 
     def _parse_navitaire_response(self, data: Any, req: FlightSearchRequest) -> list[FlightOffer]:
         """Parse Scoot Navitaire availability API response.
@@ -856,6 +1057,35 @@ class ScootConnectorClient:
                     source="scoot_direct",
                     source_tier="free",
                 ))
+
+        return offers
+
+    def _parse_flat_response(self, data: Any, req: FlightSearchRequest) -> list[FlightOffer]:
+        """Parse flatter Navitaire response structures (journeys at top level)."""
+        if not isinstance(data, dict):
+            return []
+        offers: list[FlightOffer] = []
+        booking_url = self._build_booking_url(req)
+        currency = data.get("currencyCode", "SGD")
+
+        # Try various flatter structures
+        journeys = (
+            data.get("journeys") or data.get("flights")
+            or data.get("outboundFlights")
+            or data.get("data", {}).get("journeys", [])
+            or data.get("flightList", []) or []
+        )
+        if isinstance(journeys, dict):
+            journeys = journeys.get("outbound", []) or list(journeys.values())
+        if not isinstance(journeys, list):
+            return []
+
+        for flight in journeys:
+            if not isinstance(flight, dict):
+                continue
+            offer = self._parse_single_flight(flight, currency, req, booking_url)
+            if offer:
+                offers.append(offer)
 
         return offers
 
@@ -1103,7 +1333,7 @@ class ScootConnectorClient:
     def _build_response(self, offers: list[FlightOffer], req: FlightSearchRequest,
                         elapsed: float) -> FlightSearchResponse:
         offers.sort(key=lambda o: o.price)
-        logger.info("Scoot %s->%s returned %d offers in %.1fs (CDP Chrome)",
+        logger.info("Scoot %s->%s returned %d offers in %.1fs",
                     req.origin, req.destination, len(offers), elapsed)
         h = hashlib.md5(
             f"scoot{req.origin}{req.destination}{req.date_from}".encode()
