@@ -1,29 +1,27 @@
 """
-Jetstar Playwright scraper — CDP Chrome + bundle-data-v2 JSON extraction.
+Jetstar hybrid scraper — curl_cffi direct API + SSR fetch + Playwright fallback.
 
 Jetstar (IATA: JQ) is an Australian low-cost airline in the Qantas Group,
 operating domestic/international flights across Asia-Pacific.
 
-Strategy:
-1. Launch real Chrome via subprocess + connect via CDP (port 9444) to bypass
-   Kasada bot challenge that blocks Playwright's bundled Chromium
-2. Navigate to booking.jetstar.com/au/en/booking/search-flights with query
-   params — Navitaire engine redirects to /select-flights with results
-3. Handle deeplink redirect page (click "Continue to booking" button)
-4. Dismiss "Multiple booking" overlay if present
-5. Extract <script id="bundle-data-v2" type="application/json"> containing
-   full flight data (~327KB) with Trips[].Flights[] structure
-6. Parse JourneySellKey for flight number/times, Bundles for prices
-7. Fallback: DOM extraction from aria-label price divs
+Strategy (hybrid — API first, Kasada-resilient):
+1. FAST PATH: curl_cffi with Chrome TLS impersonation → Navitaire dotREZ API.
+   POST token + POST availability/search — bypasses Kasada by not loading a
+   full browser page. ~1-3s, no browser needed.
+2. SSR FALLBACK: curl_cffi GET of booking URL → extract bundle-data-v2 JSON
+   from <script> tag in SSR-rendered page. ~2-5s, no browser needed.
+3. BROWSER FALLBACK: CDP Chrome + bundle-data-v2/DOM extraction (original
+   approach, used only when curl_cffi paths fail). ~10-25s.
 
 Booking engine observations (Mar 2026):
-- Navitaire-powered SSR booking at booking.jetstar.com
-- Direct URL: /search-flights?origin1=SYD&destination1=MEL&departuredate1=2026-04-15&ADT=1
-- Redirects through deeplinksv2 interim page → /select-flights with results
-- bundle-data-v2 JSON: Trips[0].Flights[] with JourneySellKey, Bundles[]
+- Navitaire dotREZ platform at booking.jetstar.com
+- dotREZ API: POST /api/nsk/v1/token (anonymous session) +
+  POST /api/nsk/v4/availability/search (flight search)
+- SSR page embeds <script id="bundle-data-v2" type="application/json">
+  with Trips[].Flights[] structure (~327KB)
 - JourneySellKey format: "JQ~ 501~ ~~SYD~04/15/2026 06:00~MEL~04/15/2026 07:40~~"
 - Bundles[].RegularInclusiveAmount = regular price, CjInclusiveAmount = member price
-- Kasada challenge blocks Playwright Chromium; real Chrome bypasses it
+- Kasada WAF blocks Playwright Chromium; curl_cffi TLS impersonation bypasses it
 """
 
 from __future__ import annotations
@@ -40,6 +38,12 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CURL = True
+except ImportError:
+    HAS_CURL = False
+
 from models.flights import (
     FlightOffer,
     FlightRoute,
@@ -50,6 +54,38 @@ from models.flights import (
 from connectors.browser import stealth_args, stealth_position_arg, stealth_popen_kwargs
 
 logger = logging.getLogger(__name__)
+
+# ── curl_cffi API constants ────────────────────────────────────────────────
+_IMPERSONATE = "chrome124"
+_API_BASE = "https://booking.jetstar.com"
+_TOKEN_URLS = [
+    "https://booking.jetstar.com/api/nsk/v1/token",
+    "https://booking.jetstar.com/au/en/api/nsk/v1/token",
+]
+_SEARCH_URLS = [
+    "https://booking.jetstar.com/api/nsk/v4/availability/search",
+    "https://booking.jetstar.com/au/en/api/nsk/v4/availability/search",
+    "https://booking.jetstar.com/api/nsk/v2/availability/search",
+]
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+_TOKEN_MAX_AGE = 10 * 60  # Re-acquire token every 10 minutes
+
+# ── Shared token state ─────────────────────────────────────────────────────
+_token_lock: Optional[asyncio.Lock] = None
+_cached_token: Optional[str] = None
+_token_timestamp: float = 0.0
+_working_token_url: Optional[str] = None
+_working_search_url: Optional[str] = None
+
+
+def _get_token_lock() -> asyncio.Lock:
+    global _token_lock
+    if _token_lock is None:
+        _token_lock = asyncio.Lock()
+    return _token_lock
 
 _VIEWPORTS = [
     {"width": 1366, "height": 768},
@@ -111,7 +147,7 @@ async def _get_browser():
 
 
 class JetstarConnectorClient:
-    """Jetstar Playwright scraper -- direct URL to Navitaire booking engine + DOM extraction."""
+    """Jetstar hybrid scraper — curl_cffi direct API + SSR fetch + Playwright fallback."""
 
     def __init__(self, timeout: float = 45.0):
         self.timeout = timeout
@@ -121,6 +157,27 @@ class JetstarConnectorClient:
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
+
+        # ── Fast path 1: curl_cffi direct Navitaire API ──────────────
+        if HAS_CURL:
+            try:
+                result = await self._try_direct_api(req, t0)
+                if result and result.total_results > 0:
+                    return result
+            except Exception as e:
+                logger.debug("Jetstar: direct API path failed: %s", e)
+
+        # ── Fast path 2: curl_cffi SSR page fetch ────────────────────
+        if HAS_CURL:
+            try:
+                result = await self._try_ssr_fetch(req, t0)
+                if result and result.total_results > 0:
+                    return result
+            except Exception as e:
+                logger.debug("Jetstar: SSR fetch path failed: %s", e)
+
+        # ── Slow fallback: Playwright CDP browser ────────────────────
+        logger.info("Jetstar: curl_cffi paths exhausted, falling back to Playwright")
         adults = getattr(req, "adults", 1) or 1
         dep = req.date_from.strftime("%Y-%m-%d")
         search_url = (
@@ -143,6 +200,472 @@ class JetstarConnectorClient:
                 logger.warning("Jetstar: attempt %d/%d error: %s", attempt, _MAX_ATTEMPTS, e)
 
         return self._empty(req)
+
+    # ------------------------------------------------------------------
+    # Fast path 1: curl_cffi → Navitaire dotREZ API
+    # ------------------------------------------------------------------
+
+    async def _try_direct_api(
+        self, req: FlightSearchRequest, t0: float
+    ) -> Optional[FlightSearchResponse]:
+        """Try Navitaire dotREZ availability API via curl_cffi.
+
+        1. Acquire anonymous session token from /api/nsk/v1/token
+        2. POST /api/nsk/v4/availability/search with token
+        3. Parse Navitaire availability response → FlightOffers
+        """
+        token = await self._ensure_api_token()
+        if not token:
+            logger.debug("Jetstar: no API token, skipping direct API path")
+            return None
+
+        data = await self._api_search(req, token)
+
+        # If token might be stale, re-acquire once and retry
+        if data is None:
+            logger.debug("Jetstar: API search failed, re-acquiring token")
+            global _cached_token, _token_timestamp
+            _cached_token = None
+            _token_timestamp = 0.0
+            token = await self._ensure_api_token()
+            if token:
+                data = await self._api_search(req, token)
+
+        if not data:
+            return None
+
+        offers = self._parse_api_availability(data, req)
+        if not offers:
+            return None
+
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "Jetstar %s→%s returned %d offers in %.1fs (direct API)",
+            req.origin, req.destination, len(offers), elapsed,
+        )
+        return self._build_response(offers, req, elapsed)
+
+    async def _ensure_api_token(self) -> Optional[str]:
+        """Return cached Navitaire token, acquiring a fresh one if expired."""
+        global _cached_token, _token_timestamp
+        lock = _get_token_lock()
+        async with lock:
+            age = time.monotonic() - _token_timestamp
+            if _cached_token and age < _TOKEN_MAX_AGE:
+                return _cached_token
+            return await self._acquire_api_token()
+
+    async def _acquire_api_token(self) -> Optional[str]:
+        """Fetch a fresh anonymous session token from Navitaire."""
+        global _cached_token, _token_timestamp, _working_token_url
+        loop = asyncio.get_event_loop()
+        token = await loop.run_in_executor(None, self._acquire_api_token_sync)
+        if token:
+            _cached_token = token
+            _token_timestamp = time.monotonic()
+            logger.info("Jetstar: acquired Navitaire API token")
+        return token
+
+    @staticmethod
+    def _acquire_api_token_sync() -> Optional[str]:
+        """Synchronous token acquisition via curl_cffi."""
+        global _working_token_url
+        urls = ([_working_token_url] + _TOKEN_URLS) if _working_token_url else _TOKEN_URLS
+        seen = set()
+
+        for url in urls:
+            if url in seen:
+                continue
+            seen.add(url)
+            try:
+                sess = cffi_requests.Session(impersonate=_IMPERSONATE)
+                r = sess.post(
+                    url,
+                    json={},
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json, text/plain, */*",
+                        "Origin": _API_BASE,
+                        "Referer": f"{_API_BASE}/au/en/booking/search-flights",
+                        "User-Agent": _UA,
+                    },
+                    timeout=10,
+                    allow_redirects=True,
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    token = (
+                        data.get("token")
+                        or data.get("accessToken")
+                        or data.get("data", {}).get("token")
+                    )
+                    if not token:
+                        for v in data.values():
+                            if isinstance(v, str) and len(v) > 30:
+                                token = v
+                                break
+                    if token:
+                        _working_token_url = url
+                        return token
+                logger.debug("Jetstar: token endpoint %s returned %d", url, r.status_code)
+            except Exception as e:
+                logger.debug("Jetstar: token endpoint %s error: %s", url, e)
+        return None
+
+    async def _api_search(
+        self, req: FlightSearchRequest, token: str
+    ) -> Optional[dict]:
+        """Execute Navitaire availability search via curl_cffi."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._api_search_sync, req, token)
+
+    def _api_search_sync(self, req: FlightSearchRequest, token: str) -> Optional[dict]:
+        """Synchronous Navitaire availability search."""
+        global _working_search_url
+        date_str = req.date_from.strftime("%Y-%m-%d")
+        adults = getattr(req, "adults", 1) or 1
+        children = getattr(req, "children", 0) or 0
+        infants = getattr(req, "infants", 0) or 0
+        currency = req.currency if req.currency and req.currency != "EUR" else "AUD"
+
+        body = {
+            "criteria": [
+                {
+                    "stations": {
+                        "originStationCodes": [req.origin],
+                        "destinationStationCodes": [req.destination],
+                    },
+                    "dates": {
+                        "beginDate": date_str,
+                        "endDate": date_str,
+                    },
+                }
+            ],
+            "passengers": {
+                "types": [
+                    {"type": "ADT", "count": adults},
+                ],
+            },
+            "codes": {
+                "currencyCode": currency,
+            },
+        }
+        if children:
+            body["passengers"]["types"].append({"type": "CHD", "count": children})
+        if infants:
+            body["passengers"]["types"].append({"type": "INF", "count": infants})
+
+        headers = {
+            "Authorization": f"Bearer {token}" if not token.startswith("Bearer") else token,
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/plain, */*",
+            "Origin": _API_BASE,
+            "Referer": f"{_API_BASE}/au/en/booking/search-flights",
+            "User-Agent": _UA,
+        }
+
+        urls = ([_working_search_url] + _SEARCH_URLS) if _working_search_url else _SEARCH_URLS
+        seen = set()
+
+        for url in urls:
+            if url in seen:
+                continue
+            seen.add(url)
+            try:
+                sess = cffi_requests.Session(impersonate=_IMPERSONATE)
+                r = sess.post(url, json=body, headers=headers, timeout=15)
+                if r.status_code == 200:
+                    data = r.json()
+                    if isinstance(data, dict) and (
+                        data.get("data") or data.get("trips") or data.get("journeysAvailable")
+                    ):
+                        _working_search_url = url
+                        return data
+                logger.debug(
+                    "Jetstar: search endpoint %s returned %d", url, r.status_code
+                )
+            except Exception as e:
+                logger.debug("Jetstar: search endpoint %s error: %s", url, e)
+        return None
+
+    def _parse_api_availability(
+        self, data: dict, req: FlightSearchRequest
+    ) -> list[FlightOffer]:
+        """Parse Navitaire dotREZ availability response."""
+        booking_url = self._build_booking_url(req)
+        offers: list[FlightOffer] = []
+
+        # Standard dotREZ: data.trips[].journeysAvailable[]
+        trips = (
+            data.get("data", {}).get("trips", [])
+            if isinstance(data.get("data"), dict) else
+            data.get("trips", [])
+        )
+        for trip in trips:
+            journeys = (
+                trip.get("journeysAvailable")
+                or trip.get("journeys")
+                or trip.get("Flights")
+                or trip.get("flights")
+                or []
+            )
+            for journey in journeys:
+                offer = self._parse_api_journey(journey, req, booking_url)
+                if offer:
+                    offers.append(offer)
+
+        if not offers:
+            # Fallback: flatter structures
+            journeys = (
+                data.get("journeysAvailable")
+                or data.get("journeys")
+                or data.get("flights")
+                or data.get("outboundFlights")
+                or []
+            )
+            for journey in journeys:
+                offer = self._parse_api_journey(journey, req, booking_url)
+                if offer:
+                    offers.append(offer)
+
+        return offers
+
+    def _parse_api_journey(
+        self, journey: dict, req: FlightSearchRequest, booking_url: str
+    ) -> Optional[FlightOffer]:
+        """Parse a single journey from the Navitaire API response."""
+        # Extract price from fares
+        price = self._extract_api_fare_price(journey)
+        if price is None or price <= 0:
+            # Try bundle-data style pricing
+            price = self._extract_bundle_price(journey)
+        if price is None or price <= 0:
+            price = self._extract_best_price(journey)
+        if price is None or price <= 0:
+            return None
+
+        designator = journey.get("designator", {})
+        segments_raw = journey.get("segments", [])
+        segments: list[FlightSegment] = []
+
+        for seg in segments_raw:
+            seg_des = seg.get("designator", {})
+            identifier = seg.get("identifier", {})
+            carrier = identifier.get("carrierCode", "JQ")
+            flight_no = str(identifier.get("identifier", ""))
+
+            seg_obj = FlightSegment(
+                airline=carrier,
+                airline_name="Jetstar",
+                flight_no=flight_no,
+                origin=seg_des.get("origin", req.origin),
+                destination=seg_des.get("destination", req.destination),
+                departure=self._parse_dt(seg_des.get("departure", "")),
+                arrival=self._parse_dt(seg_des.get("arrival", "")),
+                cabin_class="M",
+            )
+            segments.append(seg_obj)
+
+        if not segments:
+            # Build segment from designator
+            dep_str = designator.get("departure", "")
+            arr_str = designator.get("arrival", "")
+            origin = designator.get("origin", req.origin)
+            destination = designator.get("destination", req.destination)
+            segments.append(
+                FlightSegment(
+                    airline="JQ",
+                    airline_name="Jetstar",
+                    flight_no="",
+                    origin=origin,
+                    destination=destination,
+                    departure=self._parse_dt(dep_str),
+                    arrival=self._parse_dt(arr_str),
+                    cabin_class="M",
+                )
+            )
+
+        total_dur = 0
+        if segments and segments[0].departure and segments[-1].arrival:
+            total_dur = int((segments[-1].arrival - segments[0].departure).total_seconds())
+
+        route = FlightRoute(
+            segments=segments,
+            total_duration_seconds=max(total_dur, 0),
+            stopovers=max(len(segments) - 1, 0),
+        )
+
+        journey_key = (
+            journey.get("journeyKey")
+            or journey.get("JourneySellKey")
+            or journey.get("journeySellKey")
+            or f"{req.origin}_{req.destination}_{time.monotonic()}"
+        )
+        currency = req.currency if req.currency and req.currency != "EUR" else "AUD"
+
+        return FlightOffer(
+            id=f"jq_{hashlib.md5(str(journey_key).encode()).hexdigest()[:12]}",
+            price=round(price, 2),
+            currency=currency,
+            price_formatted=f"${price:.2f} {currency}",
+            outbound=route,
+            inbound=None,
+            airlines=["Jetstar"],
+            owner_airline="JQ",
+            booking_url=booking_url,
+            is_locked=False,
+            source="jetstar_api",
+            source_tier="free",
+        )
+
+    @staticmethod
+    def _extract_api_fare_price(journey: dict) -> Optional[float]:
+        """Extract price from Navitaire dotREZ fares structure."""
+        fares = journey.get("fares", {})
+        best = float("inf")
+
+        if isinstance(fares, dict):
+            for fare_key, fare_info in fares.items():
+                if not isinstance(fare_info, dict):
+                    continue
+                # passengerFares[].fareAmount
+                pax_fares = fare_info.get("passengerFares", [])
+                for pf in pax_fares:
+                    for key in ["fareAmount", "publishedFare", "amount", "serviceChargeTotal"]:
+                        val = pf.get(key)
+                        if val is not None:
+                            try:
+                                v = float(val)
+                                if 0 < v < best:
+                                    best = v
+                            except (TypeError, ValueError):
+                                pass
+        elif isinstance(fares, list):
+            for fare in fares:
+                if not isinstance(fare, dict):
+                    continue
+                for key in ["price", "amount", "totalPrice", "fareAmount"]:
+                    val = fare.get(key)
+                    if isinstance(val, dict):
+                        val = val.get("amount") or val.get("value")
+                    if val is not None:
+                        try:
+                            v = float(val)
+                            if 0 < v < best:
+                                best = v
+                        except (TypeError, ValueError):
+                            pass
+
+        return best if best < float("inf") else None
+
+    # ------------------------------------------------------------------
+    # Fast path 2: SSR page fetch via curl_cffi
+    # ------------------------------------------------------------------
+
+    async def _try_ssr_fetch(
+        self, req: FlightSearchRequest, t0: float
+    ) -> Optional[FlightSearchResponse]:
+        """Fetch booking page via curl_cffi, extract bundle-data-v2 from HTML."""
+        loop = asyncio.get_event_loop()
+        html = await loop.run_in_executor(None, self._ssr_fetch_sync, req)
+        if not html:
+            return None
+
+        # Extract bundle-data-v2 JSON from HTML
+        flight_data = self._extract_bundle_from_html(html)
+        if flight_data:
+            offers = self._parse_bundle_data_v2(flight_data, req)
+            if offers:
+                elapsed = time.monotonic() - t0
+                logger.info(
+                    "Jetstar %s→%s returned %d offers in %.1fs (SSR fetch)",
+                    req.origin, req.destination, len(offers), elapsed,
+                )
+                return self._build_response(offers, req, elapsed)
+
+        # Try Navitaire JSON from inline scripts
+        flight_data = self._extract_flight_json_from_html(html)
+        if flight_data:
+            offers = self._parse_navitaire_data(flight_data, req)
+            if offers:
+                elapsed = time.monotonic() - t0
+                logger.info(
+                    "Jetstar %s→%s returned %d offers in %.1fs (SSR inline JSON)",
+                    req.origin, req.destination, len(offers), elapsed,
+                )
+                return self._build_response(offers, req, elapsed)
+
+        return None
+
+    def _ssr_fetch_sync(self, req: FlightSearchRequest) -> Optional[str]:
+        """Fetch the booking page HTML via curl_cffi."""
+        booking_url = self._build_booking_url(req)
+        sess = cffi_requests.Session(impersonate=_IMPERSONATE)
+        try:
+            r = sess.get(
+                booking_url,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-AU,en;q=0.9",
+                    "User-Agent": _UA,
+                },
+                timeout=20,
+                allow_redirects=True,
+            )
+            if r.status_code == 200 and len(r.text) > 1000:
+                logger.debug("Jetstar: SSR fetch got %d bytes", len(r.text))
+                return r.text
+            logger.debug("Jetstar: SSR fetch returned %d (%d bytes)", r.status_code, len(r.text))
+        except Exception as e:
+            logger.debug("Jetstar: SSR fetch error: %s", e)
+        return None
+
+    @staticmethod
+    def _extract_bundle_from_html(html: str) -> Optional[dict]:
+        """Extract bundle-data-v2 JSON from raw HTML string."""
+        # Look for <script id="bundle-data-v2" type="application/json">...</script>
+        m = re.search(
+            r'<script\s+id=["\']bundle-data(?:-v2)?["\']\s+type=["\']application/json["\']>\s*(.*?)\s*</script>',
+            html,
+            re.DOTALL,
+        )
+        if not m:
+            # Broader fallback
+            m = re.search(
+                r'<script\s+id=["\']bundle-data[^"\']*["\'][^>]*>\s*(.*?)\s*</script>',
+                html,
+                re.DOTALL,
+            )
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return None
+
+    @staticmethod
+    def _extract_flight_json_from_html(html: str) -> Optional[dict]:
+        """Extract Navitaire FlightData or availability JSON from inline scripts."""
+        import html as html_mod
+        # FlightData = '...';
+        m = re.search(r"FlightData\s*=\s*'([\s\S]*?)';", html)
+        if m:
+            try:
+                return json.loads(html_mod.unescape(m.group(1)))
+            except (json.JSONDecodeError, ValueError):
+                pass
+        # availability = {...};
+        m = re.search(r"(?:availability|AvailabilityV2|flightSearch)\s*=\s*(\{[\s\S]*?\});", html)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return None
+
+    # ------------------------------------------------------------------
+    # Playwright fallback (original browser approach, demoted)
+    # ------------------------------------------------------------------
 
     async def _attempt_search(
         self, url: str, req: FlightSearchRequest
@@ -793,7 +1316,6 @@ class JetstarConnectorClient:
 
     def _build_response(self, offers: list[FlightOffer], req: FlightSearchRequest, elapsed: float) -> FlightSearchResponse:
         offers.sort(key=lambda o: o.price)
-        logger.info("Jetstar %s->%s returned %d offers in %.1fs (Playwright)", req.origin, req.destination, len(offers), elapsed)
         h = hashlib.md5(f"jetstar{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
