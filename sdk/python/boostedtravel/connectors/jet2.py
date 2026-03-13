@@ -27,7 +27,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import random
 import re
 import time
 from datetime import date, datetime
@@ -42,8 +41,6 @@ from boostedtravel.models.flights import (
     FlightSearchResponse,
     FlightSegment,
 )
-from boostedtravel.connectors.browser import stealth_args
-
 logger = logging.getLogger(__name__)
 
 # ── Config ─────────────────────────────────────────────────────────────────
@@ -64,10 +61,12 @@ _TIMEZONES = [
     "Europe/Paris", "Europe/Madrid",
 ]
 
-# ── Shared browser singleton ──────────────────────────────────────────────
+# ── Persistent headed browser context ─────────────────────────────────────────
+import os as _os
+_USER_DATA_DIR = _os.path.join(_os.environ.get("TEMP", "/tmp"), "jet2_pw_data")
 _pw_instance = None
-_browser = None
-_browser_lock: Optional[asyncio.Lock] = None
+_pw_context = None
+_context_lock: Optional[asyncio.Lock] = None
 
 # ── Cookie farm state ─────────────────────────────────────────────────────
 _farm_lock: Optional[asyncio.Lock] = None
@@ -106,10 +105,10 @@ _STATIC_SLUGS: dict[str, str] = {
 
 
 def _get_lock() -> asyncio.Lock:
-    global _browser_lock
-    if _browser_lock is None:
-        _browser_lock = asyncio.Lock()
-    return _browser_lock
+    global _context_lock
+    if _context_lock is None:
+        _context_lock = asyncio.Lock()
+    return _context_lock
 
 
 def _get_farm_lock() -> asyncio.Lock:
@@ -126,42 +125,52 @@ def _get_slug_lock() -> asyncio.Lock:
     return _slug_cache_lock
 
 
-async def _get_browser():
-    """Shared headed Chromium (launched once, reused across searches)."""
-    global _pw_instance, _browser
+async def _get_context():
+    """Persistent headed Chrome context — off-screen to bypass Akamai headless detection."""
+    global _pw_instance, _pw_context
     lock = _get_lock()
     async with lock:
-        if _browser and _browser.is_connected():
-            return _browser
+        if _pw_context:
+            try:
+                _pw_context.pages
+                return _pw_context
+            except Exception:
+                _pw_context = None
+
         from playwright.async_api import async_playwright
 
+        _os.makedirs(_USER_DATA_DIR, exist_ok=True)
         _pw_instance = await async_playwright().start()
-        try:
-            _browser = await _pw_instance.chromium.launch(
-                headless=True,
-                channel="chrome",
-                args=["--disable-blink-features=AutomationControlled", *stealth_args()],
-            )
-        except Exception:
-            _browser = await _pw_instance.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox", *stealth_args()],
-            )
-        logger.info("Jet2: Playwright browser launched (headed Chrome)")
-        return _browser
+
+        _pw_context = await _pw_instance.chromium.launch_persistent_context(
+            _USER_DATA_DIR,
+            channel="chrome",
+            headless=False,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--window-position=-2400,-2400",
+                "--window-size=1366,768",
+            ],
+            viewport={"width": 1366, "height": 768},
+            locale="en-GB",
+            timezone_id="Europe/London",
+            service_workers="block",
+        )
+        logger.info("Jet2: persistent headed Chrome context ready")
+        return _pw_context
 
 
-async def _reset_browser():
-    """Close and reset browser (used when PX blocks the session)."""
-    global _pw_instance, _browser
+async def _reset_context():
+    """Close and reset context (used when PX blocks the session)."""
+    global _pw_instance, _pw_context
     lock = _get_lock()
     async with lock:
-        if _browser:
+        if _pw_context:
             try:
-                await _browser.close()
+                await _pw_context.close()
             except Exception:
                 pass
-            _browser = None
+            _pw_context = None
         if _pw_instance:
             try:
                 await _pw_instance.stop()
@@ -245,7 +254,7 @@ class Jet2ConnectorClient:
         return await self._farm_cookies()
 
     async def _farm_cookies(self) -> list[dict]:
-        """Load Jet2 homepage in Playwright to farm Akamai cookies."""
+        """Load Jet2 homepage in persistent context to farm Akamai cookies."""
         global _farmed_cookies, _farm_timestamp
         lock = _get_farm_lock()
         async with lock:
@@ -253,19 +262,10 @@ class Jet2ConnectorClient:
             if _farmed_cookies and (time.monotonic() - _farm_timestamp) < _COOKIE_MAX_AGE:
                 return _farmed_cookies
 
-            browser = await _get_browser()
-            context = await browser.new_context(
-                viewport=random.choice(_VIEWPORTS),
-                locale=random.choice(_LOCALES),
-                timezone_id=random.choice(_TIMEZONES),
-            )
+            ctx = await _get_context()
+            page = None
             try:
-                try:
-                    from playwright_stealth import stealth_async
-                    page = await context.new_page()
-                    await stealth_async(page)
-                except ImportError:
-                    page = await context.new_page()
+                page = await ctx.new_page()
 
                 # Also capture airport info API during homepage load
                 async def on_response(response):
@@ -293,8 +293,8 @@ class Jet2ConnectorClient:
                 await self._dismiss_overlays(page)
                 await asyncio.sleep(1.5)
 
-                # Extract cookies
-                cookies = await context.cookies()
+                # Extract cookies from persistent context
+                cookies = await ctx.cookies()
                 if cookies:
                     _farmed_cookies = cookies
                     _farm_timestamp = time.monotonic()
@@ -305,7 +305,11 @@ class Jet2ConnectorClient:
                 logger.error("Jet2: cookie farm error: %s", e)
                 return []
             finally:
-                await context.close()
+                if page:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
 
     # ------------------------------------------------------------------
     # Direct API via curl_cffi
@@ -460,7 +464,7 @@ class Jet2ConnectorClient:
         for attempt in range(2):
             if attempt > 0:
                 logger.info("Jet2: retry %d with fresh browser", attempt)
-                await _reset_browser()
+                await _reset_context()
                 await asyncio.sleep(3.0)
             try:
                 return await self._do_search(req, t0)
@@ -473,20 +477,10 @@ class Jet2ConnectorClient:
         return self._empty(req)
 
     async def _do_search(self, req: FlightSearchRequest, t0: float) -> FlightSearchResponse:
-        browser = await _get_browser()
-        context = await browser.new_context(
-            viewport=random.choice(_VIEWPORTS),
-            locale=random.choice(_LOCALES),
-            timezone_id=random.choice(_TIMEZONES),
-        )
+        ctx = await _get_context()
+        page = await ctx.new_page()
 
         try:
-            try:
-                from playwright_stealth import stealth_async
-                page = await context.new_page()
-                await stealth_async(page)
-            except ImportError:
-                page = await context.new_page()
 
             # ── Set up API interception ────────────────────────────────
             captured: dict[str, Any] = {}
@@ -627,7 +621,11 @@ class Jet2ConnectorClient:
             logger.error("Jet2 Playwright error: %s", e)
             return self._empty(req)
         finally:
-            await context.close()
+            if page:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
 
     # ── Direct API fetch ─────────────────────────────────────────────
 
