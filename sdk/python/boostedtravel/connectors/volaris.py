@@ -25,7 +25,6 @@ import logging
 import os
 import random
 import re
-import subprocess
 import time
 from datetime import datetime
 from typing import Any, Optional
@@ -53,10 +52,9 @@ _TIMEZONES = [
     "America/Chicago", "America/Los_Angeles",
 ]
 
-# ── Shared browser singleton via CDP ────────────────────────────────────
-_CDP_PORT = 9466
-_chrome_proc = None
+# ── Shared browser singleton — headed Chrome ────────────────────────────
 _browser = None
+_pw_instance = None
 _browser_lock: Optional[asyncio.Lock] = None
 
 
@@ -68,33 +66,25 @@ def _get_lock() -> asyncio.Lock:
 
 
 async def _get_browser():
-    """Connect to a real Chrome instance via CDP (launched once, reused)."""
-    global _chrome_proc, _browser
+    """Launch headed Chrome via Playwright (reused across searches)."""
+    global _browser, _pw_instance
     lock = _get_lock()
     async with lock:
         if _browser and _browser.is_connected():
             return _browser
         from playwright.async_api import async_playwright
-
-        from boostedtravel.connectors.browser import find_chrome, stealth_args, stealth_popen_kwargs
-        chrome_path = find_chrome()
-        user_data = os.path.join(os.environ.get("TEMP", "/tmp"), "chrome-cdp-volaris")
-        _chrome_proc = subprocess.Popen([
-            chrome_path,
-            f"--remote-debugging-port={_CDP_PORT}",
-            f"--user-data-dir={user_data}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-web-security",
-            "--disable-features=IsolateOrigins,site-per-process",
-            *stealth_args(),
-        ], **stealth_popen_kwargs())
-        await asyncio.sleep(1.5)
-
-        pw = await async_playwright().start()
-        _browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{_CDP_PORT}")
-        logger.info("Volaris: Connected to real Chrome via CDP (port %d)", _CDP_PORT)
+        _pw_instance = await async_playwright().start()
+        _browser = await _pw_instance.chromium.launch(
+            headless=False, channel="chrome",
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-web-security",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--window-position=-2400,-2400",
+                "--window-size=1366,768",
+            ],
+        )
+        logger.info("Volaris: headed Chrome ready")
         return _browser
 
 
@@ -140,34 +130,15 @@ class VolarisConnectorClient:
                     url = response.url.lower()
                     status = response.status
                     ct = response.headers.get("content-type", "")
-                    if status == 200 and "json" in ct and (
-                        "availability" in url
-                        or "flights/search" in url
-                        or "/api/v1/flights" in url
-                        or "/api/nsk/" in url
-                        or "search/results" in url
-                        or "offers" in url
-                        or "fares" in url
-                        or "shopping" in url
-                        or "lowfare" in url
-                        or "apigw.volaris.com" in url
-                    ):
+                    if status != 200 or "json" not in ct:
+                        return
+                    # Only capture the main availability/search response
+                    if "availability/search" in url or "availability/lowfare" in url:
                         data = await response.json()
-                        if data and isinstance(data, (dict, list)):
-                            # Check for flight-relevant data
-                            if isinstance(data, list) or (
-                                isinstance(data, dict) and any(
-                                    k in data for k in [
-                                        "trips", "journeys", "flights",
-                                        "availability", "data", "offers",
-                                        "schedules", "outbound", "outboundFlights",
-                                        "lowFareAvailability",
-                                    ]
-                                )
-                            ):
-                                captured_data["json"] = data
-                                api_event.set()
-                                logger.info("Volaris: captured flight API response")
+                        if isinstance(data, dict) and ("results" in data or "faresAvailable" in data):
+                            captured_data["json"] = data
+                            api_event.set()
+                            logger.info("Volaris: captured availability response from %s", response.url[:80])
                 except Exception:
                     pass
 
@@ -175,7 +146,7 @@ class VolarisConnectorClient:
 
             logger.info("Volaris: loading homepage for %s->%s", req.origin, req.destination)
             await page.goto(
-                "https://www.volaris.com/en",
+                "https://www.volaris.com/es-mx",
                 wait_until="domcontentloaded",
                 timeout=int(self.timeout * 1000),
             )
@@ -299,16 +270,17 @@ class VolarisConnectorClient:
         Volaris uses headlessui Combobox components. The inputs are
         ``input[role="combobox"]`` elements. Typing the IATA code filters
         the listbox; each matching city is a ``div[role="option"]``.
+        Uses keyboard.type() instead of fill() to trigger autocomplete.
         """
         try:
             combo = page.locator('input[role="combobox"]').nth(index)
             if await combo.count() == 0:
-                # Fallback: try aria-label
                 label_part = "origin" if index == 0 else "destination"
                 combo = page.locator(f'[aria-label*="fc-booking-{label_part}"]').first
             await combo.click(timeout=3000)
             await asyncio.sleep(0.3)
-            await combo.fill(iata)
+            await combo.fill("")  # clear
+            await page.keyboard.type(iata, delay=80)
             await asyncio.sleep(2.0)
 
             # Pick the first matching option
@@ -481,34 +453,50 @@ class VolarisConnectorClient:
     def _parse_response(self, data: Any, req: FlightSearchRequest) -> list[FlightOffer]:
         if isinstance(data, list):
             data = {"flights": data}
-        currency = req.currency or "MXN"
+        currency = data.get("currencyCode") or req.currency or "MXN"
         booking_url = self._build_booking_url(req)
         offers: list[FlightOffer] = []
 
-        # Navitaire-style response
-        flights_raw = (
-            data.get("trips", [{}])[0].get("dates", [{}])[0].get("journeys") if data.get("trips") else None
-        ) or (
-            data.get("outboundFlights")
-            or data.get("outbound")
-            or data.get("journeys")
-            or data.get("flights")
-            or data.get("data", {}).get("flights", [])
-            or []
-        )
+        # Volaris v3 availability/search format:
+        # results[0].trips[0].journeysAvailableByMarket["ORIG|DEST"] → journeys
+        # faresAvailable[fareAvailabilityKey] → {totals: {fareTotal}}
+        fares_available = data.get("faresAvailable", {})
+        results = data.get("results", [])
+        flights_raw = []
+
+        if results:
+            for result in results:
+                for trip in result.get("trips", []):
+                    markets = trip.get("journeysAvailableByMarket", {})
+                    for market_key, journeys in markets.items():
+                        flights_raw.extend(journeys)
+
+        # Fallback for other Navitaire-style formats
+        if not flights_raw:
+            flights_raw = (
+                data.get("trips", [{}])[0].get("dates", [{}])[0].get("journeys")
+                if data.get("trips") else None
+            ) or (
+                data.get("outboundFlights")
+                or data.get("outbound")
+                or data.get("journeys")
+                or data.get("flights")
+                or data.get("data", {}).get("flights", [])
+                or []
+            )
         if isinstance(flights_raw, dict):
             flights_raw = flights_raw.get("outbound", []) or flights_raw.get("journeys", [])
         if not isinstance(flights_raw, list):
             flights_raw = []
 
         for flight in flights_raw:
-            offer = self._parse_single_flight(flight, currency, req, booking_url)
+            offer = self._parse_single_flight(flight, currency, req, booking_url, fares_available)
             if offer:
                 offers.append(offer)
         return offers
 
-    def _parse_single_flight(self, flight: dict, currency: str, req: FlightSearchRequest, booking_url: str) -> Optional[FlightOffer]:
-        best_price = self._extract_best_price(flight)
+    def _parse_single_flight(self, flight: dict, currency: str, req: FlightSearchRequest, booking_url: str, fares_available: dict = None) -> Optional[FlightOffer]:
+        best_price = self._extract_best_price(flight, fares_available or {})
         if best_price is None or best_price <= 0:
             return None
 
@@ -546,9 +534,39 @@ class VolarisConnectorClient:
         )
 
     @staticmethod
-    def _extract_best_price(flight: dict) -> Optional[float]:
-        fares = flight.get("fares") or flight.get("fareProducts") or flight.get("bundles") or flight.get("fareBundles") or []
+    def _extract_best_price(flight: dict, fares_available: dict = None) -> Optional[float]:
         best = float("inf")
+        # Volaris v3: journey.fares[].fareAvailabilityKey → faresAvailable[key].totals.fareTotal
+        if fares_available:
+            for fare_ref in flight.get("fares", []):
+                key = fare_ref.get("fareAvailabilityKey", "")
+                fare_data = fares_available.get(key)
+                if isinstance(fare_data, dict):
+                    totals = fare_data.get("totals", {})
+                    fare_total = totals.get("fareTotal")
+                    if fare_total is not None:
+                        try:
+                            v = float(fare_total)
+                            if 0 < v < best:
+                                best = v
+                        except (TypeError, ValueError):
+                            pass
+                elif isinstance(fare_data, list):
+                    for fd in fare_data:
+                        totals = fd.get("totals", {}) if isinstance(fd, dict) else {}
+                        fare_total = totals.get("fareTotal")
+                        if fare_total is not None:
+                            try:
+                                v = float(fare_total)
+                                if 0 < v < best:
+                                    best = v
+                            except (TypeError, ValueError):
+                                pass
+        # If v3 fare lookup found a price, return it immediately
+        if best < float("inf"):
+            return best
+        # Generic Navitaire fare extraction (fallback)
+        fares = flight.get("fares") or flight.get("fareProducts") or flight.get("bundles") or flight.get("fareBundles") or []
         for fare in fares:
             if isinstance(fare, dict):
                 for key in ["price", "amount", "totalPrice", "basePrice", "fareAmount", "passengerFare"]:
@@ -574,9 +592,13 @@ class VolarisConnectorClient:
         return best if best < float("inf") else None
 
     def _build_segment(self, seg: dict, default_origin: str, default_dest: str) -> FlightSegment:
-        dep_str = seg.get("departureDateTime") or seg.get("departure") or seg.get("departureDate") or seg.get("std") or ""
-        arr_str = seg.get("arrivalDateTime") or seg.get("arrival") or seg.get("arrivalDate") or seg.get("sta") or ""
+        desig = seg.get("designator") or {}
+        dep_str = seg.get("departureDateTime") or seg.get("departure") or seg.get("departureDate") or seg.get("std") or desig.get("departure", "")
+        arr_str = seg.get("arrivalDateTime") or seg.get("arrival") or seg.get("arrivalDate") or seg.get("sta") or desig.get("arrival", "")
         flight_no = str(seg.get("flightNumber") or seg.get("flight_no") or seg.get("number") or seg.get("identifier", {}).get("identifier", "")).replace(" ", "")
+        carrier = str(seg.get("identifier", {}).get("carrierCode", "Y4"))
+        if flight_no and not flight_no.startswith(carrier):
+            flight_no = f"{carrier}{flight_no}"
         origin = seg.get("origin") or seg.get("departureStation") or seg.get("departureAirport") or seg.get("designator", {}).get("origin", default_origin)
         destination = seg.get("destination") or seg.get("arrivalStation") or seg.get("arrivalAirport") or seg.get("designator", {}).get("destination", default_dest)
         return FlightSegment(
@@ -627,3 +649,4 @@ class VolarisConnectorClient:
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
             currency=req.currency or "MXN", offers=[], total_results=0,
         )
+

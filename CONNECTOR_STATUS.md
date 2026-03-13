@@ -80,7 +80,7 @@
 | # | Connector | IATA | Issue | Status | Claimed by | Timestamp | Commit/PR |
 |---|-----------|------|-------|--------|------------|-----------|-----------|
 | 23 | airarabia | G9 | — | `broken` | | | |
-| 24 | jazeera | J9 | — | `broken` | | | |
+| 24 | jazeera | J9 | — | `claimed` | copilot-batikair-fix | 2026-03-14T03:00Z | |
 | 25 | jejuair | 7C | — | `broken` | | | |
 
 ### Blocked / Special (6)

@@ -596,6 +596,9 @@ class VolarisConnectorClient:
         dep_str = seg.get("departureDateTime") or seg.get("departure") or seg.get("departureDate") or seg.get("std") or desig.get("departure", "")
         arr_str = seg.get("arrivalDateTime") or seg.get("arrival") or seg.get("arrivalDate") or seg.get("sta") or desig.get("arrival", "")
         flight_no = str(seg.get("flightNumber") or seg.get("flight_no") or seg.get("number") or seg.get("identifier", {}).get("identifier", "")).replace(" ", "")
+        carrier = str(seg.get("identifier", {}).get("carrierCode", "Y4"))
+        if flight_no and not flight_no.startswith(carrier):
+            flight_no = f"{carrier}{flight_no}"
         origin = seg.get("origin") or seg.get("departureStation") or seg.get("departureAirport") or seg.get("designator", {}).get("origin", default_origin)
         destination = seg.get("destination") or seg.get("arrivalStation") or seg.get("arrivalAirport") or seg.get("designator", {}).get("destination", default_dest)
         return FlightSegment(
