@@ -221,10 +221,11 @@ class IndiGoConnectorClient:
             await context.close()
 
     async def _dismiss_cookies(self, page) -> None:
-        # IndiGo has a minimal cookie notice — try to close it
+        # IndiGo has cookie notices and occasional modal dialogs — dismiss them
         for label in [
             "Accept", "Accept All", "Accept all", "I agree",
             "Got it", "OK", "Close", "Dismiss", "Agree",
+            "Accept Cookies", "Accept cookies", "Continue",
         ]:
             try:
                 btn = page.get_by_role("button", name=re.compile(rf"^{re.escape(label)}$", re.IGNORECASE))
@@ -242,13 +243,29 @@ class IndiGoConnectorClient:
                 await asyncio.sleep(0.3)
         except Exception:
             pass
+        # Close any close/X buttons on modals/overlays
+        for close_sel in [
+            "button[aria-label='Close'], button[aria-label='close']",
+            "[class*='modal'] button[class*='close'], [class*='overlay'] button[class*='close']",
+            "[class*='dialog'] button[class*='close']",
+        ]:
+            try:
+                loc = page.locator(close_sel)
+                if await loc.count() > 0 and await loc.first.is_visible():
+                    await loc.first.click(timeout=2000)
+                    await asyncio.sleep(0.3)
+                    return
+            except Exception:
+                continue
+        # JS removal of cookie/consent/modal overlays
         try:
             await page.evaluate("""() => {
                 document.querySelectorAll(
                     '[class*="cookie"], [id*="cookie"], [class*="consent"], [id*="consent"], ' +
                     '[class*="Cookie"], [id*="Cookie"], [class*="onetrust"], [id*="onetrust"], ' +
                     '[class*="modal-overlay"], [class*="popup"], [id*="popup"], ' +
-                    '[class*="privacy"], [id*="privacy"], [class*="dialog"]'
+                    '[class*="privacy"], [id*="privacy"], [class*="dialog"], ' +
+                    '[class*="banner"], [class*="Banner"]'
                 ).forEach(el => { if (el.offsetHeight > 0) el.remove(); });
                 document.body.style.overflow = 'auto';
             }""")
@@ -258,72 +275,263 @@ class IndiGoConnectorClient:
     async def _set_one_way(self, page) -> None:
         # IndiGo radio inputs are hidden; click the visible label/wrapper instead.
         # One Way is the default selection, but click it to be safe.
+
+        # Strategy 1: Check if already selected via radio input
+        for radio_sel in [
+            "input#radio-input-triptype-oneWay",
+            "input[value='oneWay'], input[value='one-way'], input[value='OW']",
+            "input[name*='tripType'][value*='one' i]",
+        ]:
+            try:
+                radio = page.locator(radio_sel)
+                if await radio.count() > 0 and await radio.first.is_checked():
+                    return
+            except Exception:
+                continue
+
+        # Strategy 2: Click wrapper/label for radio input
+        for wrapper_sel in [
+            "label[for='radio-input-triptype-oneWay']",
+            "input#radio-input-triptype-oneWay + *",
+            "label[for*='oneWay'], label[for*='one-way'], label[for*='oneway']",
+            "[data-testid*='oneWay'], [data-testid*='one-way']",
+        ]:
+            try:
+                loc = page.locator(wrapper_sel)
+                if await loc.count() > 0 and await loc.first.is_visible():
+                    await loc.first.click(timeout=3000)
+                    return
+            except Exception:
+                continue
+
+        # Strategy 3: Click by visible text
+        for txt in ["One Way", "One way", "ONE WAY", "One-Way", "One-way"]:
+            try:
+                loc = page.get_by_text(txt, exact=True)
+                if await loc.count() > 0 and await loc.first.is_visible():
+                    await loc.first.click(timeout=3000)
+                    return
+            except Exception:
+                continue
+
+        # Strategy 4: Role-based radio button
         try:
-            radio = page.locator("input#radio-input-triptype-oneWay")
-            if await radio.count() > 0 and await radio.is_checked():
-                return  # already selected
-        except Exception:
-            pass
-        # Click the wrapper div that contains the radio + label text
-        try:
-            wrapper = page.locator("label[for='radio-input-triptype-oneWay'], input#radio-input-triptype-oneWay + *")
-            if await wrapper.count() > 0:
-                await wrapper.first.click(timeout=3000)
+            loc = page.get_by_role("radio", name=re.compile(r"one.?way", re.IGNORECASE))
+            if await loc.count() > 0:
+                await loc.first.click(timeout=3000, force=True)
                 return
         except Exception:
             pass
+
+        # Strategy 5: JS fallback — find and click one-way option
         try:
-            ow = page.get_by_text("One Way", exact=True).first
-            if ow and await ow.count() > 0:
-                await ow.click(timeout=3000)
+            await page.evaluate("""() => {
+                const els = document.querySelectorAll(
+                    'label, span, div, button, input, [role="radio"], [role="tab"]'
+                );
+                for (const el of els) {
+                    const txt = (el.textContent || '').trim().toLowerCase();
+                    if ((txt === 'one way' || txt === 'one-way' || txt === 'oneway') &&
+                        el.offsetHeight > 0) {
+                        el.click();
+                        return;
+                    }
+                }
+            }""")
         except Exception:
             pass
 
     async def _fill_airport_field(self, page, label: str, iata: str, index: int) -> bool:
         """
-        IndiGo DOM: inputs are hidden inside .popover__wrapper divs.
-        Click the container (aria-label 'sourceCity'/'destinationCity') to reveal
-        a combobox input, type the IATA code, then click the matching suggestion.
+        Fill an airport field by clicking its container, typing the IATA code,
+        and selecting from the suggestion dropdown.
+
+        Uses multiple selector strategies for resilience against DOM changes.
+        The IndiGo React SPA periodically changes class names, so we try
+        text/placeholder/role-based selectors first, then CSS class patterns,
+        then JS evaluation as a last resort.
         """
         try:
-            # Step 1: Click the city selector container to reveal the combobox
-            if index == 0:
-                container = page.locator("[aria-label*='sourceCity'], .popover__wrapper.search-widget-form-body__from")
-            else:
-                container = page.locator("[aria-label*='destinationCity'], .popover__wrapper.search-widget-form-body__to")
-            await container.first.click(timeout=5000, no_wait_after=True)
-            await asyncio.sleep(0.8)
+            # ── Step 1: Click the city selector container to reveal the input ──
+            clicked = False
 
-            # Step 2: Find the now-visible combobox input and type the IATA code
-            combo = page.locator("input[role='combobox']")
-            visible_combos = []
-            for i in range(await combo.count()):
-                if await combo.nth(i).is_visible():
-                    visible_combos.append(combo.nth(i))
-            if not visible_combos:
-                logger.warning("IndiGo: no visible combobox after clicking %s container", label)
+            # Build ordered selector lists per field
+            if index == 0:
+                css_selectors = [
+                    "[data-testid*='origin'], [data-testid*='source'], [data-testid*='from']",
+                    "[aria-label*='sourceCity'], [aria-label*='origin'], [aria-label*='Origin']",
+                    "[class*='source'][class*='city'], [class*='origin'][class*='city']",
+                    ".popover__wrapper.search-widget-form-body__from",
+                    "[class*='search-widget'][class*='from'], [class*='searchWidget'][class*='from']",
+                    "[class*='departure'][class*='city'], [class*='from'][class*='airport']",
+                ]
+                text_labels = ["From", "Flying from", "Origin", "Departure city", "Where from"]
+                placeholder_patterns = [r"from", r"flying\s*from", r"origin", r"departure", r"where\s*from"]
+            else:
+                css_selectors = [
+                    "[data-testid*='destination'], [data-testid*='dest'], [data-testid*='to']",
+                    "[aria-label*='destinationCity'], [aria-label*='destination'], [aria-label*='Destination']",
+                    "[class*='destination'][class*='city'], [class*='dest'][class*='city']",
+                    ".popover__wrapper.search-widget-form-body__to",
+                    "[class*='search-widget'][class*='to'], [class*='searchWidget'][class*='to']",
+                    "[class*='arrival'][class*='city'], [class*='to'][class*='airport']",
+                ]
+                text_labels = ["To", "Going to", "Destination", "Arrival city", "Where to"]
+                placeholder_patterns = [r"to", r"going\s*to", r"destination", r"arrival", r"where\s*to"]
+
+            # Strategy A: CSS selectors
+            for sel in css_selectors:
+                try:
+                    loc = page.locator(sel)
+                    if await loc.count() > 0 and await loc.first.is_visible():
+                        await loc.first.click(timeout=5000, no_wait_after=True)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+
+            # Strategy B: Placeholder-based
+            if not clicked:
+                for pat in placeholder_patterns:
+                    try:
+                        loc = page.locator(f"input[placeholder]").filter(
+                            has=page.locator(f":scope")
+                        )
+                        # Use get_by_placeholder for regex matching
+                        loc = page.get_by_placeholder(re.compile(pat, re.IGNORECASE))
+                        if await loc.count() > 0:
+                            await loc.first.click(timeout=3000)
+                            clicked = True
+                            break
+                    except Exception:
+                        continue
+
+            # Strategy C: Role-based textbox
+            if not clicked:
+                for txt in text_labels:
+                    try:
+                        loc = page.get_by_role("textbox", name=re.compile(rf".*{re.escape(txt)}.*", re.IGNORECASE))
+                        if await loc.count() > 0 and await loc.first.is_visible():
+                            await loc.first.click(timeout=3000)
+                            clicked = True
+                            break
+                    except Exception:
+                        continue
+
+            # Strategy D: Text-based click on label/span
+            if not clicked:
+                for txt in text_labels:
+                    try:
+                        loc = page.get_by_text(txt, exact=True)
+                        if await loc.count() > 0 and await loc.first.is_visible():
+                            await loc.first.click(timeout=3000)
+                            clicked = True
+                            break
+                    except Exception:
+                        continue
+
+            # Strategy E: JS evaluation — find visible clickable element by text
+            if not clicked:
+                js_labels = "|".join(t.lower() for t in text_labels)
+                clicked = await page.evaluate(f"""() => {{
+                    const labels = "{js_labels}".split("|");
+                    const els = document.querySelectorAll(
+                        'div, span, label, button, input, [role="combobox"], [role="textbox"]'
+                    );
+                    for (const el of els) {{
+                        const txt = (el.textContent || el.placeholder || '').trim().toLowerCase();
+                        if (labels.some(l => txt === l || txt.startsWith(l + '?') || txt.startsWith(l + ' ')) &&
+                            el.offsetHeight > 0 && el.offsetWidth > 0) {{
+                            el.click();
+                            return true;
+                        }}
+                    }}
+                    return false;
+                }}""")
+
+            if not clicked:
+                logger.warning("IndiGo: could not find %s airport container", label)
                 return False
-            inp = visible_combos[0]
+
+            await asyncio.sleep(1.0)
+
+            # ── Step 2: Find the visible input and type the IATA code ──
+            inp = None
+
+            # Try combobox role input first
+            combo = page.locator("input[role='combobox']")
+            for i in range(await combo.count()):
+                try:
+                    if await combo.nth(i).is_visible():
+                        inp = combo.nth(i)
+                        break
+                except Exception:
+                    continue
+
+            # Try any visible text input in the search area
+            if not inp:
+                for sel in [
+                    "input[type='text']:visible", "input[type='search']:visible",
+                    "input:not([type]):visible",
+                    "input[role='searchbox']",
+                    "input[autocomplete]",
+                ]:
+                    try:
+                        loc = page.locator(sel)
+                        for i in range(await loc.count()):
+                            if await loc.nth(i).is_visible() and await loc.nth(i).is_editable():
+                                inp = loc.nth(i)
+                                break
+                        if inp:
+                            break
+                    except Exception:
+                        continue
+
+            # Last resort: any focused input
+            if not inp:
+                try:
+                    inp = page.locator("input:focus")
+                    if await inp.count() == 0:
+                        inp = None
+                except Exception:
+                    pass
+
+            if not inp:
+                logger.warning("IndiGo: no visible input after clicking %s container", label)
+                return False
+
             await inp.fill("")
             await asyncio.sleep(0.2)
             await inp.press_sequentially(iata, delay=80)
             await asyncio.sleep(1.5)
 
-            # Step 3: Click the matching suggestion.
-            # Suggestions show IATA code as text in a child element; find and click.
-            # First try: a container element whose inner text includes the exact IATA code
-            sugg = page.locator(
-                f".search-widget-form-body__from .airport-search-list-item :text-is('{iata}'), "
-                f".search-widget-form-body__to .airport-search-list-item :text-is('{iata}'), "
-                f".popover__wrapper .airport-search-list-item :text-is('{iata}')"
-            )
-            if await sugg.count() > 0:
-                await sugg.first.click(timeout=3000)
-                return True
+            # ── Step 3: Click the matching suggestion ──
 
-            # Second try: any visible element whose text exactly matches the IATA code
-            # (excluding the input itself)
-            exact_match = page.locator(f"div:text-is('{iata}'), span:text-is('{iata}')")
+            # Approach 1: Suggestion list items containing the IATA code
+            for sugg_sel in [
+                f".airport-search-list-item :text-is('{iata}')",
+                f"[class*='airport'][class*='list'] :text-is('{iata}')",
+                f"[class*='suggestion'] :text-is('{iata}')",
+                f"[class*='dropdown'] :text-is('{iata}')",
+                f"[class*='autocomplete'] :text-is('{iata}')",
+                f"[role='listbox'] [role='option']:has-text('{iata}')",
+                f"[role='listbox'] li:has-text('{iata}')",
+                f"li:has-text('{iata}')",
+            ]:
+                try:
+                    loc = page.locator(sugg_sel)
+                    if await loc.count() > 0:
+                        await loc.first.click(timeout=3000)
+                        return True
+                except Exception:
+                    continue
+
+            # Approach 2: Any visible div/span/li with exact IATA text
+            exact_match = page.locator(
+                f"div:text-is('{iata}'), span:text-is('{iata}'), "
+                f"li:text-is('{iata}'), p:text-is('{iata}'), "
+                f"strong:text-is('{iata}'), b:text-is('{iata}')"
+            )
             for i in range(await exact_match.count()):
                 el = exact_match.nth(i)
                 try:
@@ -333,7 +541,24 @@ class IndiGoConnectorClient:
                 except Exception:
                     continue
 
-            # Third try: keyboard selection (ArrowDown + Enter)
+            # Approach 3: JS click on leaf text node matching IATA
+            js_clicked = await page.evaluate(f"""() => {{
+                const els = document.querySelectorAll('*');
+                for (const el of els) {{
+                    if (el.children.length === 0 &&
+                        el.textContent.trim() === '{iata}' &&
+                        el.offsetHeight > 0 &&
+                        el.getBoundingClientRect().top > 0) {{
+                        el.click();
+                        return true;
+                    }}
+                }}
+                return false;
+            }}""")
+            if js_clicked:
+                return True
+
+            # Approach 4: Keyboard selection (ArrowDown + Enter)
             await page.keyboard.press("ArrowDown")
             await asyncio.sleep(0.3)
             await page.keyboard.press("Enter")
@@ -345,75 +570,182 @@ class IndiGoConnectorClient:
 
     async def _fill_date(self, page, req: FlightSearchRequest) -> bool:
         """
-        IndiGo uses react-date-range calendar (rdrCalendarWrapper).
-        Click departure button → navigate months → click day by aria-label.
-        Day aria-labels: "Wednesday, 11 March 2026" etc.
-        Navigate via .rdrNextButton / .rdrPprevButton.
+        IndiGo uses react-date-range or a custom calendar component.
+        Click departure button → navigate months → click day.
+
+        Uses multiple selector strategies for resilience.
         """
         target = req.date_from
         try:
-            # Click departure date button to open calendar
-            dep_btn = page.locator("button[class*='departureDate'], .popover__wrapper.search-widget-form-body__departure")
-            if await dep_btn.count() == 0:
-                dep_btn = page.locator("[aria-label*='departureDate']")
-            await dep_btn.first.click(timeout=5000)
+            # ── Click departure date button to open calendar ──
+            opened = False
+
+            for sel in [
+                "button[class*='departureDate']",
+                ".popover__wrapper.search-widget-form-body__departure",
+                "[aria-label*='departureDate'], [aria-label*='departure']",
+                "[data-testid*='departure'], [data-testid*='date']",
+                "[class*='departure'][class*='date'], [class*='depart'][class*='date']",
+                "[class*='search-widget'][class*='departure'], [class*='searchWidget'][class*='departure']",
+            ]:
+                try:
+                    loc = page.locator(sel)
+                    if await loc.count() > 0 and await loc.first.is_visible():
+                        await loc.first.click(timeout=5000)
+                        opened = True
+                        break
+                except Exception:
+                    continue
+
+            if not opened:
+                for txt in ["Departure", "Depart", "Travel date", "Date", "Select date"]:
+                    try:
+                        loc = page.get_by_text(txt, exact=False)
+                        if await loc.count() > 0 and await loc.first.is_visible():
+                            await loc.first.click(timeout=3000)
+                            opened = True
+                            break
+                    except Exception:
+                        continue
+
+            if not opened:
+                try:
+                    loc = page.get_by_role("textbox", name=re.compile(r"depart|date|travel", re.IGNORECASE))
+                    if await loc.count() > 0:
+                        await loc.first.click(timeout=3000)
+                        opened = True
+                except Exception:
+                    pass
+
+            if not opened:
+                logger.warning("IndiGo: could not open date picker")
+                return False
+
             await asyncio.sleep(0.8)
 
-            # Navigate to target month using react-date-range next button
+            # ── Navigate to target month ──
             target_month_year = target.strftime("%B %Y")  # e.g. "April 2026"
             for _ in range(14):
-                header = page.locator(".rdrMonthAndYearPickers, .rdrMonthName")
-                if await header.count() > 0:
-                    text = await header.first.inner_text()
-                    if target_month_year.lower() in text.lower():
-                        break
-                # Also check all month name elements (multi-month view)
-                month_names = page.locator(".rdrMonthName")
-                for i in range(await month_names.count()):
-                    mn_text = await month_names.nth(i).inner_text()
-                    if target_month_year.lower() in mn_text.lower():
-                        break
+                # Check month headers in various calendar implementations
+                for header_sel in [
+                    ".rdrMonthAndYearPickers", ".rdrMonthName",
+                    "[class*='month'][class*='title']", "[class*='month'][class*='header']",
+                    "[class*='calendar'][class*='header']", "[class*='Calendar'][class*='header']",
+                    "[class*='monthYear'], [class*='month-year']",
+                ]:
+                    try:
+                        header = page.locator(header_sel)
+                        if await header.count() > 0:
+                            text = await header.first.inner_text()
+                            if target_month_year.lower() in text.lower():
+                                break
+                    except Exception:
+                        continue
                 else:
-                    # Click next month button
-                    nxt = page.locator(".rdrNextButton")
-                    if await nxt.count() > 0:
-                        await nxt.first.click(timeout=2000)
+                    # Check all month name elements (multi-month view)
+                    found_month = False
+                    month_names = page.locator(
+                        ".rdrMonthName, [class*='monthName'], [class*='month-name'], "
+                        "[class*='calendarMonth'], [class*='calendar-month']"
+                    )
+                    for i in range(await month_names.count()):
+                        try:
+                            mn_text = await month_names.nth(i).inner_text()
+                            if target_month_year.lower() in mn_text.lower():
+                                found_month = True
+                                break
+                        except Exception:
+                            continue
+
+                    if not found_month:
+                        # Click next month button
+                        next_clicked = False
+                        for nxt_sel in [
+                            ".rdrNextButton",
+                            "button[aria-label*='next' i]", "button[aria-label*='Next']",
+                            "[class*='next'][class*='month']", "[class*='Next'][class*='Month']",
+                            "[class*='calendar'] [class*='next']",
+                            "[class*='arrow'][class*='right'], [class*='chevron'][class*='right']",
+                        ]:
+                            try:
+                                nxt = page.locator(nxt_sel)
+                                if await nxt.count() > 0 and await nxt.first.is_visible():
+                                    await nxt.first.click(timeout=2000)
+                                    next_clicked = True
+                                    break
+                            except Exception:
+                                continue
+                        if not next_clicked:
+                            break
                         await asyncio.sleep(0.4)
                         continue
                     break
-                break  # found in month_names loop
+                break
 
-            # Click the target day
-            # IndiGo day spans have aria-label like "Wednesday, 11 March 2026"
+            # ── Click the target day ──
             day_num = target.day
             day_name = target.strftime("%A")  # e.g. "Wednesday"
             month_name = target.strftime("%B")  # e.g. "March"
+
+            # Approach 1: react-date-range aria-label format
             aria_label = f"{day_name}, {day_num} {month_name} {target.year}"
-
-            day_el = page.locator(f"span[aria-label='{aria_label}']")
-            if await day_el.count() > 0:
-                # Wait for calendar animation to settle, then force-click
-                await asyncio.sleep(0.5)
-                await day_el.first.click(timeout=5000, force=True)
-                await asyncio.sleep(0.5)
-                return True
-
-            # Fallback: match partial aria-label
-            day_el = page.locator(f"span[aria-label*='{day_num} {month_name} {target.year}']")
+            day_el = page.locator(f"span[aria-label='{aria_label}'], button[aria-label='{aria_label}']")
             if await day_el.count() > 0:
                 await asyncio.sleep(0.5)
                 await day_el.first.click(timeout=5000, force=True)
                 await asyncio.sleep(0.5)
                 return True
 
-            # Last fallback: click rdrDay button matching the day number
-            day_btns = page.locator(".rdrDay:not(.rdrDayDisabled) .rdrDayNumber span")
+            # Approach 2: Partial aria-label match
+            day_el = page.locator(f"span[aria-label*='{day_num} {month_name} {target.year}'], button[aria-label*='{day_num} {month_name} {target.year}']")
+            if await day_el.count() > 0:
+                await asyncio.sleep(0.5)
+                await day_el.first.click(timeout=5000, force=True)
+                await asyncio.sleep(0.5)
+                return True
+
+            # Approach 3: US-style aria-label (Month Day, Year)
+            aria_us = f"{month_name} {day_num}, {target.year}"
+            day_el = page.locator(f"[aria-label='{aria_us}'], [aria-label*='{aria_us}']")
+            if await day_el.count() > 0:
+                await asyncio.sleep(0.5)
+                await day_el.first.click(timeout=5000, force=True)
+                await asyncio.sleep(0.5)
+                return True
+
+            # Approach 4: ISO date data attribute
+            iso_date = target.strftime("%Y-%m-%d")
+            for date_sel in [
+                f"[data-date='{iso_date}']",
+                f"[data-testid='{day_num}-{target.month}-{target.year}']",
+                f"[data-value='{iso_date}']",
+                f"[aria-label*='{iso_date}']",
+            ]:
+                try:
+                    day_el = page.locator(date_sel)
+                    if await day_el.count() > 0:
+                        await day_el.first.click(timeout=3000, force=True)
+                        await asyncio.sleep(0.5)
+                        return True
+                except Exception:
+                    continue
+
+            # Approach 5: react-date-range day button by number
+            day_btns = page.locator(
+                ".rdrDay:not(.rdrDayDisabled) .rdrDayNumber span, "
+                "[class*='calendar'] [class*='day']:not([class*='disabled']) span, "
+                "[class*='calendar'] td:not([class*='disabled']) button, "
+                "[class*='calendar'] td:not([class*='disabled']) span"
+            )
             for i in range(await day_btns.count()):
                 btn = day_btns.nth(i)
-                txt = (await btn.inner_text()).strip()
-                if txt == str(day_num):
-                    await btn.click(timeout=3000)
-                    return True
+                try:
+                    txt = (await btn.inner_text()).strip()
+                    if txt == str(day_num):
+                        await btn.click(timeout=3000)
+                        return True
+                except Exception:
+                    continue
 
             logger.warning("IndiGo: could not find day %s in calendar", day_num)
             return False
@@ -422,7 +754,9 @@ class IndiGoConnectorClient:
             return False
 
     async def _click_search(self, page) -> None:
-        # IndiGo search button starts disabled; wait for it to become enabled
+        # IndiGo search button — try multiple strategies
+
+        # Strategy 1: Enabled button with "Search" text
         try:
             search_btn = page.locator("button:has-text('Search'):not([disabled])")
             await search_btn.first.wait_for(state="visible", timeout=5000)
@@ -431,19 +765,44 @@ class IndiGoConnectorClient:
             return
         except Exception:
             pass
-        for label in ["Search", "SEARCH", "Search Flights", "Search flights", "Find flights"]:
+
+        # Strategy 2: Role-based button matching search labels
+        for label in ["Search", "SEARCH", "Search Flights", "Search flights", "Find flights", "Let's go"]:
             try:
                 btn = page.get_by_role("button", name=re.compile(rf"^{re.escape(label)}$", re.IGNORECASE))
                 if await btn.count() > 0:
                     await btn.first.click(timeout=5000, force=True)
-                    logger.info("IndiGo: clicked search (force)")
+                    logger.info("IndiGo: clicked search (role)")
                     return
             except Exception:
                 continue
+
+        # Strategy 3: CSS class patterns
+        for sel in [
+            "button[class*='search'][class*='btn'], button[class*='Search'][class*='Btn']",
+            "button[class*='search-button'], button[class*='searchButton']",
+            "[data-testid*='search'][data-testid*='button']",
+            "a[class*='search'][class*='btn'], a[class*='Search']",
+        ]:
+            try:
+                loc = page.locator(sel)
+                if await loc.count() > 0 and await loc.first.is_visible():
+                    await loc.first.click(timeout=5000)
+                    logger.info("IndiGo: clicked search (css)")
+                    return
+            except Exception:
+                continue
+
+        # Strategy 4: Submit button
         try:
             await page.locator("button[type='submit']").first.click(timeout=3000)
+            logger.info("IndiGo: clicked search (submit)")
+            return
         except Exception:
-            await page.keyboard.press("Enter")
+            pass
+
+        # Strategy 5: Enter key
+        await page.keyboard.press("Enter")
 
     async def _extract_from_dom(self, page, req: FlightSearchRequest) -> list[FlightOffer]:
         try:
