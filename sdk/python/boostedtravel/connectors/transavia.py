@@ -2,22 +2,14 @@
 Transavia hybrid scraper — cookie-farm + curl_cffi direct API.
 
 Transavia operates as HV (Transavia Netherlands) and TO (Transavia France).
+Part of the Air France-KLM group.
 
-The flight-availability API (/start/api/flight-availability) is behind Cloudflare
-WAF — requires valid cf_clearance cookie from a browser session.
-
-Strategy (hybrid cookie-farm):
-1. ONCE per ~25 min: Playwright opens homepage, accepts cookie banner, navigates to
-   booking page. This generates valid Cloudflare cookies (cf_clearance, __cf_bm).
-   Extract all cookies via context.cookies().
-2. For each search: curl_cffi uses farmed cookies to:
-   a) GET /book/en-eu/search-a-flight?ds=ORIGIN&as=DEST&... (initialize session)
-   b) GET /start/api/flight-availability?type=full&update=false (fetch results)
-3. Parse outboundFlight.timeSlots → FlightOffers
-
-Result: ~1-3s per search instead of ~8-15s with full Playwright.
-
-Fallback: Full Playwright browser flow if API fails (existing code).
+Strategy (multi-tier, Mar 2026):
+1. (Fastest ~0.5-2s) Direct POST to /api/search/oneway — semi-public API
+   endpoint from the AF-KLM group. No cookies or session needed.
+2. (Fast ~1-3s) curl_cffi session: GET homepage first to establish Cloudflare
+   session, then GET booking page, then GET /start/api/flight-availability.
+3. (Slow ~8-15s) Full Playwright browser flow as fallback.
 
 Transavia booking page form (verified Mar 2026):
   - #one-way radio → selects one-way trip
@@ -34,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import random
 import re
@@ -68,6 +61,11 @@ _LOCALES = ["en-GB", "en-US", "en-NL"]
 _TIMEZONES = ["Europe/London", "Europe/Amsterdam", "Europe/Paris", "Europe/Berlin"]
 
 _AVAILABILITY_URL = "https://www.transavia.com/start/api/flight-availability"
+# Direct search API endpoints (AF-KLM group semi-public APIs)
+_SEARCH_API_URLS = [
+    "https://www.transavia.com/api/search/oneway",
+    "https://www.transavia.com/start/api/search",
+]
 _IMPERSONATE = "chrome131"
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -124,9 +122,10 @@ class TransaviaConnectorClient:
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
         """
-        Search Transavia flights via cookie-farm + curl_cffi direct API.
+        Search Transavia flights via direct API / cookie-farm + curl_cffi.
 
-        Fast path (~1-3s): curl_cffi with farmed cookies → GET /start/api/flight-availability.
+        Fast path (~0.5-2s): Direct POST to Transavia search API (no cookies).
+        Medium path (~1-3s): curl_cffi session warmed via homepage + availability API.
         Slow path (~15s): Playwright farms cookies first, then curl_cffi.
         Fallback: Full Playwright browser flow if API fails.
         """
@@ -136,19 +135,22 @@ class TransaviaConnectorClient:
             if not HAS_CURL:
                 return await self._playwright_fallback(req, t0)
 
-            cookies = await self._ensure_cookies()
-            if not cookies:
-                logger.warning("Transavia: cookie farm failed, falling back to Playwright")
-                return await self._playwright_fallback(req, t0)
-
-            data = await self._api_search(req, cookies)
-
-            # If search failed (expired cookies), re-farm once and retry
-            if data is None:
-                logger.info("Transavia: API search failed, re-farming cookies")
-                cookies = await self._farm_cookies()
+            # Try cookieless direct API first (fastest)
+            data = await self._api_search(req, cookies=[])
+            if data:
+                logger.info("Transavia: cookieless API succeeded")
+            else:
+                # Try with farmed cookies
+                cookies = await self._ensure_cookies()
                 if cookies:
                     data = await self._api_search(req, cookies)
+
+                # If search failed (expired cookies), re-farm once and retry
+                if data is None:
+                    logger.info("Transavia: API search failed, re-farming cookies")
+                    cookies = await self._farm_cookies()
+                    if cookies:
+                        data = await self._api_search(req, cookies)
 
             # If API still fails, fall back to full Playwright
             if not data:
@@ -269,7 +271,7 @@ class TransaviaConnectorClient:
     def _api_search_sync(
         self, req: FlightSearchRequest, cookies: list[dict],
     ) -> Optional[dict]:
-        """Synchronous curl_cffi: load booking page then fetch availability API."""
+        """Synchronous curl_cffi: direct POST API first, then session-warmed flow."""
         sess = cffi_requests.Session(impersonate=_IMPERSONATE)
 
         # Load farmed cookies into session
@@ -277,26 +279,45 @@ class TransaviaConnectorClient:
             domain = c.get("domain", "")
             sess.cookies.set(c["name"], c["value"], domain=domain)
 
-        headers = {
+        # ── Strategy 1: Direct POST to search API (no session needed) ──
+        data = self._try_direct_search(sess, req)
+        if data:
+            return data
+
+        # ── Strategy 2: Session-warmed flow ────────────────────────────
+        # GET homepage first to establish Cloudflare clearance, then
+        # GET booking page to initialise server-side search session,
+        # then GET /start/api/flight-availability for results.
+
+        html_headers = {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-GB,en;q=0.9",
             "User-Agent": _UA,
-            "Referer": "https://www.transavia.com/en-EU/home/",
         }
 
-        # Step 1: Load booking page to initialize server-side search session
-        booking_url = self._build_booking_url(req)
+        # Step 1: Warm session via homepage (sets cf_clearance cookie)
         try:
-            r = sess.get(booking_url, headers=headers, timeout=15)
+            sess.get(
+                "https://www.transavia.com/en-EU/home/",
+                headers=html_headers,
+                timeout=15,
+            )
         except Exception as e:
-            logger.error("Transavia: booking page request failed: %s", e)
-            return None
+            logger.debug("Transavia: homepage warm-up failed: %s", e)
 
-        if r.status_code != 200:
-            logger.warning("Transavia: booking page returned %d", r.status_code)
-            return None
+        # Step 2: Load booking page to initialise server-side search session
+        booking_url = self._build_booking_url(req)
+        html_headers["Referer"] = "https://www.transavia.com/en-EU/home/"
+        try:
+            r = sess.get(booking_url, headers=html_headers, timeout=15)
+            if r.status_code != 200:
+                logger.warning("Transavia: booking page returned %d", r.status_code)
+        except Exception as e:
+            logger.warning("Transavia: booking page request failed: %s", e)
 
-        # Step 2: Fetch flight availability from the API
+        # Step 3: Fetch flight availability from the API
+        # Try even if booking page returned non-200 — the session cookies
+        # from the homepage may be enough for the API endpoint.
         api_headers = {
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "en-GB,en;q=0.9",
@@ -325,17 +346,79 @@ class TransaviaConnectorClient:
             logger.warning("Transavia: API response not JSON: %s", e)
             return None
 
-        # Validate response has flight data
+        return self._validate_api_data(data)
+
+    # ------------------------------------------------------------------
+    # Direct POST search (AF-KLM semi-public API)
+    # ------------------------------------------------------------------
+
+    def _try_direct_search(
+        self, sess: Any, req: FlightSearchRequest,
+    ) -> Optional[dict]:
+        """POST search params to Transavia's direct search API endpoints."""
+        dep_str = req.date_from.strftime("%Y-%m-%d")
+        payload = json.dumps({
+            "routesList": [
+                {"origin": req.origin, "destination": req.destination}
+            ],
+            "datesRange": {
+                "startDate": dep_str,
+                "endDate": dep_str,
+            },
+            "passengers": {
+                "adults": req.adults,
+                "children": req.children or 0,
+                "infants": req.infants or 0,
+            },
+            "searchType": "oneway",
+            "currency": req.currency or "EUR",
+        })
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-GB,en;q=0.9",
+            "Content-Type": "application/json",
+            "User-Agent": _UA,
+            "Origin": "https://www.transavia.com",
+            "Referer": "https://www.transavia.com/en-EU/home/",
+        }
+
+        for api_url in _SEARCH_API_URLS:
+            try:
+                r = sess.post(api_url, data=payload, headers=headers, timeout=15)
+                if r.status_code != 200:
+                    logger.debug("Transavia: direct API %s returned %d", api_url, r.status_code)
+                    continue
+                data = r.json()
+                result = self._validate_api_data(data)
+                if result:
+                    logger.info("Transavia: direct API hit via %s", api_url)
+                    return result
+            except Exception as e:
+                logger.debug("Transavia: direct API %s error: %s", api_url, e)
+                continue
+
+        return None
+
+    # ------------------------------------------------------------------
+    # API response validation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_api_data(data: Optional[dict]) -> Optional[dict]:
+        """Check that an API response dict contains flight data."""
+        if not data or not isinstance(data, dict):
+            return None
+
         ob = data.get("outboundFlight")
         if ob and isinstance(ob, dict) and ob.get("timeSlots"):
             logger.info("Transavia: API returned %d time slots", len(ob["timeSlots"]))
             return data
 
-        # Check for legacy response formats
+        # Check for legacy / alternative response formats
         if any(data.get(k) for k in ("outboundFlights", "outbound", "flights", "availableFlights")):
             return data
 
-        logger.warning("Transavia: API response has no flight data")
+        logger.debug("Transavia: API response has no flight data")
         return None
 
     # ------------------------------------------------------------------
