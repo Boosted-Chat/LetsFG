@@ -66,7 +66,7 @@
 | 12 | jetstar | JQ | [#31](https://github.com/Boosted-Chat/BoostedTravel/issues/31) | `done` | copilot-eurowings-fix | 2026-03-14T00:00Z | CDP Chrome + Kasada warm-up bypass |
 | 13 | lionair | JT | [#35](https://github.com/Boosted-Chat/BoostedTravel/issues/35) | `blocked` | copilot-main | 2026-03-13T22:00Z | IBE2 booking engine dead (0-byte responses), booking.lionair.co.id connection refused |
 | 14 | luckyair | 8L | — | `done` | copilot-eurowings-fix | 2026-03-14T01:15Z | timeout enforcement + cleanup |
-| 15 | nineair | AQ | — | `broken` | | | |
+| 15 | nineair | AQ | — | `done` | copilot-eurowings-fix | 2026-03-14T01:25Z | timeout + cleanup (works CAN→HRB 5 offers) |
 | 16 | norwegian | DY | [#22](https://github.com/Boosted-Chat/BoostedTravel/issues/22) | `done` | copilot-batikair-fix | 2026-03-13T21:17Z | Headed CDP Chrome for Incapsula cookies; 20 offers OSL→LGW 1.1s cached |
 | 17 | peach | MM | [#36](https://github.com/Boosted-Chat/BoostedTravel/issues/36) | `claimed` | claude-connector-fix | 2026-03-13T21:42Z | |
 | 18 | pegasus | PC | [#37](https://github.com/Boosted-Chat/BoostedTravel/issues/37) | `done` | copilot-main | 2026-03-13T22:15Z | MCP-style Chrome flags bypass Akamai; direct booking URL + /pegasus/availability interception; 40 offers SAW→AYT |

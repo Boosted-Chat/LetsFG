@@ -45,8 +45,6 @@ from models.flights import (
     FlightSearchResponse,
     FlightSegment,
 )
-from connectors.browser import stealth_args
-
 logger = logging.getLogger(__name__)
 
 # ── Module-level browser state (cleaned up by engine.py) ───────────────────
@@ -163,7 +161,7 @@ class NineAirConnectorClient:
         ``_fmOpt.sign()`` signature. The server accepts sign-only payloads.
         """
 
-        remaining = lambda: max(self.timeout - (time.monotonic() - t0), 5)
+        remaining = lambda: max(self.timeout - (time.monotonic() - t0), 1)
 
         captured_data: dict = {}
         api_event = asyncio.Event()
