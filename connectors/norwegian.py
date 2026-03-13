@@ -6,16 +6,14 @@ calls api-des.norwegian.com (Amadeus Digital Experience Suite). The search API
 is behind Incapsula, which blocks raw HTTP clients. The token API is NOT
 behind Incapsula.
 
-Strategy (hybrid cookie-farm):
-1. ONCE per ~25 min: Playwright opens homepage, fills search form, submits.
-   This generates valid Incapsula cookies (reese84, visid_incap, etc.).
-   Extract all cookies via context.cookies().
-2. For each search: curl_cffi uses farmed cookies to:
-   a) POST token/initialization → get Bearer access_token (~0.4s)
-   b) POST airlines/DY/v2/search/air-bounds → get flight data (~0.6s)
-3. Parse airBoundGroups → FlightOffers
-
-Result: ~1s per search instead of ~45s with full Playwright.
+Strategy (three-tier):
+1. FAST: curl_cffi with impersonate alone (no cookies) — works when Incapsula
+   accepts the TLS fingerprint without a prior browser session (~1s).
+2. COOKIE-FARM: Playwright opens booking.norwegian.com deep-link, generates
+   valid Incapsula cookies (reese84, visid_incap, etc.), then curl_cffi
+   replays them for the token + search API calls (~3-5s first time, ~1s cached).
+3. FALLBACK: Full Playwright browser interception — navigates to the booking
+   deep-link and intercepts the air-bounds API response directly (~15-25s).
 
 API details (discovered Mar 2026):
   Token: POST api-des.norwegian.com/v1/security/oauth2/token/initialization
@@ -65,9 +63,14 @@ _CLIENT_ID = "YnF1uDBnJMWsGEmAndoGljO0DgkBeWaE"
 _CLIENT_SECRET = "mrYaim0FdBrNRRZf"
 _TOKEN_URL = "https://api-des.norwegian.com/v1/security/oauth2/token/initialization"
 _SEARCH_URL = "https://api-des.norwegian.com/airlines/DY/v2/search/air-bounds"
-_IMPERSONATE = "chrome131"
-_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-_COOKIE_MAX_AGE = 25 * 60  # Re-farm cookies after 25 minutes
+_BOOKING_ORIGIN = "https://booking.norwegian.com"
+_IMPERSONATE = "chrome124"
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+_SEC_CH_UA = '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"'
+_COOKIE_MAX_AGE = 15 * 60  # Re-farm cookies after 15 minutes
 
 # Shared cookie farm state
 _farm_lock: Optional[asyncio.Lock] = None
@@ -106,31 +109,36 @@ class NorwegianConnectorClient:
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
         """
-        Search Norwegian flights via cookie-farm + curl_cffi direct API.
+        Search Norwegian flights via three-tier strategy.
 
-        Fast path (~1s): curl_cffi with farmed Incapsula cookies.
-        Slow path (~18s): Playwright farms cookies first, then curl_cffi.
+        Tier 1 (~1s): curl_cffi cookieless — impersonation alone.
+        Tier 2 (~1-3s): curl_cffi with farmed Incapsula cookies.
+        Tier 3 (~15-25s): Full Playwright interception fallback.
         """
         t0 = time.monotonic()
 
         try:
-            cookies = await self._ensure_cookies(req)
-            if not cookies:
-                logger.warning("Norwegian: cookie farm failed, no cookies")
-                return self._empty(req)
-
-            data = await self._api_search(req, cookies)
-
-            # If search failed (expired cookies), re-farm once and retry
-            if data is None:
-                logger.info("Norwegian: API search failed, re-farming cookies")
-                cookies = await self._farm_cookies(req)
+            # Tier 1: try cookieless API first (curl_cffi impersonation only)
+            data = await self._api_search(req, cookies=[])
+            if data:
+                logger.info("Norwegian: cookieless API succeeded")
+            else:
+                # Tier 2: farm cookies and retry
+                cookies = await self._ensure_cookies(req)
                 if cookies:
                     data = await self._api_search(req, cookies)
 
-            if not data:
-                logger.warning("Norwegian: no data after search")
-                return self._empty(req)
+                # Re-farm once if stale
+                if data is None and cookies:
+                    logger.info("Norwegian: API search failed, re-farming cookies")
+                    cookies = await self._farm_cookies(req)
+                    if cookies:
+                        data = await self._api_search(req, cookies)
+
+                # Tier 3: full Playwright interception
+                if not data:
+                    logger.warning("Norwegian: API returned no data, falling back to Playwright")
+                    return await self._playwright_fallback(req, t0)
 
             elapsed = time.monotonic() - t0
             offers = self._parse_air_bounds(data, req)
@@ -173,7 +181,7 @@ class NorwegianConnectorClient:
             return await self._farm_cookies(req)
 
     async def _farm_cookies(self, req: FlightSearchRequest) -> list[dict]:
-        """Open Playwright, do one search, extract Incapsula cookies."""
+        """Open Playwright, navigate to booking deep-link, extract Incapsula cookies."""
         global _farmed_cookies, _farm_timestamp
 
         browser = await _get_browser()
@@ -203,21 +211,27 @@ class NorwegianConnectorClient:
 
             page.on("response", on_response)
 
-            logger.info("Norwegian: farming cookies via %s→%s", req.origin, req.destination)
+            # Navigate to booking.norwegian.com (the Angular SPA that calls
+            # api-des.norwegian.com).  This is the domain whose Incapsula
+            # cookies the API actually checks — www.norwegian.com cookies are
+            # for a different Incapsula site-id and are not accepted by the API.
+            date_str = req.date_from.strftime("%Y-%m-%d")
+            deep_url = (
+                f"{_BOOKING_ORIGIN}/en/offer?"
+                f"D_City={req.origin}&A_City={req.destination}"
+                f"&TripType=1&D_Day={date_str}"
+                f"&AdultCount={req.adults}"
+                f"&ChildCount={req.children or 0}"
+                f"&InfantCount={req.infants or 0}"
+            )
+            logger.info("Norwegian: farming cookies via booking deep-link %s→%s", req.origin, req.destination)
             await page.goto(
-                "https://www.norwegian.com/en/",
+                deep_url,
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
             await self._dismiss_cookies(page)
-
-            # Extract cookies from page load (Incapsula sets them on first visit)
-            page_cookies = await context.cookies()
-
-            await self._fill_search_form(page, req)
-            await self._dismiss_cookies(page)
-            await self._click_search(page)
 
             remaining = max(self.timeout - 5, 15)
             try:
@@ -225,10 +239,7 @@ class NorwegianConnectorClient:
             except asyncio.TimeoutError:
                 logger.warning("Norwegian: cookie farm search timed out, using page-load cookies")
 
-            # Get final cookies (may have more after search)
             cookies = await context.cookies()
-            if not cookies:
-                cookies = page_cookies
             if cookies:
                 _farmed_cookies = cookies
                 _farm_timestamp = time.monotonic()
@@ -258,10 +269,24 @@ class NorwegianConnectorClient:
         """Synchronous curl_cffi token + search."""
         sess = cffi_requests.Session(impersonate=_IMPERSONATE)
 
-        # Load farmed cookies into session
+        # Load farmed cookies into session (may be empty for cookieless path)
         for c in cookies:
             domain = c.get("domain", "")
             sess.cookies.set(c["name"], c["value"], domain=domain)
+
+        # Common browser-like headers to satisfy Incapsula
+        _browser_headers = {
+            "User-Agent": _UA,
+            "Origin": _BOOKING_ORIGIN,
+            "Referer": f"{_BOOKING_ORIGIN}/",
+            "sec-ch-ua": _SEC_CH_UA,
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-site",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
 
         # Step 1: Get OAuth2 token
         date_str = req.date_from.strftime("%Y-%m-%dT00:00:00")
@@ -285,9 +310,9 @@ class NorwegianConnectorClient:
                     "fact": fact,
                 },
                 headers={
-                    "User-Agent": _UA,
-                    "Origin": "https://booking.norwegian.com",
-                    "Referer": "https://booking.norwegian.com/",
+                    **_browser_headers,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "*/*",
                 },
                 timeout=15,
             )
@@ -325,10 +350,8 @@ class NorwegianConnectorClient:
                 _SEARCH_URL,
                 json=search_body,
                 headers={
-                    "User-Agent": _UA,
+                    **_browser_headers,
                     "Authorization": f"Bearer {access_token}",
-                    "Origin": "https://booking.norwegian.com",
-                    "Referer": "https://booking.norwegian.com/",
                     "Content-Type": "application/json",
                     "Accept": "application/json, text/plain, */*",
                 },
@@ -356,7 +379,112 @@ class NorwegianConnectorClient:
         return travelers or [{"passengerTypeCode": "ADT"}]
 
     # ------------------------------------------------------------------
-    # Form interaction for cookie farming (selectors verified Mar 2026)
+    # Playwright fallback (full browser flow, used if API fails)
+    # ------------------------------------------------------------------
+
+    async def _playwright_fallback(
+        self, req: FlightSearchRequest, t0: float,
+    ) -> FlightSearchResponse:
+        """Full Playwright interception flow as fallback."""
+        browser = await _get_browser()
+        context = await browser.new_context(
+            viewport=random.choice(_VIEWPORTS),
+            locale=random.choice(_LOCALES),
+            timezone_id=random.choice(_TIMEZONES),
+            service_workers="block",
+        )
+
+        try:
+            try:
+                from playwright_stealth import stealth_async
+                page = await context.new_page()
+                await stealth_async(page)
+            except ImportError:
+                page = await context.new_page()
+
+            captured_data: dict = {}
+            api_event = asyncio.Event()
+
+            async def on_response(response):
+                try:
+                    url = response.url.lower()
+                    ct = response.headers.get("content-type", "")
+                    if response.status != 200 or "json" not in ct:
+                        return
+                    if "air-bounds" in url or "airbounds" in url:
+                        data = await response.json()
+                        if data and isinstance(data, dict):
+                            captured_data["json"] = data
+                            api_event.set()
+                except Exception:
+                    pass
+
+            page.on("response", on_response)
+
+            date_str = req.date_from.strftime("%Y-%m-%d")
+            deep_url = (
+                f"{_BOOKING_ORIGIN}/en/offer?"
+                f"D_City={req.origin}&A_City={req.destination}"
+                f"&TripType=1&D_Day={date_str}"
+                f"&AdultCount={req.adults}"
+                f"&ChildCount={req.children or 0}"
+                f"&InfantCount={req.infants or 0}"
+            )
+            logger.info("Norwegian: Playwright fallback for %s→%s", req.origin, req.destination)
+            await page.goto(
+                deep_url,
+                wait_until="domcontentloaded",
+                timeout=int(self.timeout * 1000),
+            )
+            await asyncio.sleep(2.0)
+            await self._dismiss_cookies(page)
+
+            remaining = max(self.timeout - (time.monotonic() - t0), 10)
+            try:
+                await asyncio.wait_for(api_event.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                logger.warning("Norwegian: fallback timed out waiting for API response")
+                return self._empty(req)
+
+            # Also update cookie farm from this successful browser session
+            global _farmed_cookies, _farm_timestamp
+            _farmed_cookies = await context.cookies()
+            _farm_timestamp = time.monotonic()
+
+            data = captured_data.get("json", {})
+            if not data:
+                return self._empty(req)
+
+            elapsed = time.monotonic() - t0
+            offers = self._parse_air_bounds(data, req)
+            offers.sort(key=lambda o: o.price)
+
+            logger.info(
+                "Norwegian %s→%s returned %d offers in %.1fs (Playwright fallback)",
+                req.origin, req.destination, len(offers), elapsed,
+            )
+
+            search_hash = hashlib.md5(
+                f"norwegian{req.origin}{req.destination}{req.date_from}".encode()
+            ).hexdigest()[:12]
+
+            return FlightSearchResponse(
+                search_id=f"fs_{search_hash}",
+                origin=req.origin,
+                destination=req.destination,
+                currency=offers[0].currency if offers else req.currency,
+                offers=offers,
+                total_results=len(offers),
+            )
+
+        except Exception as e:
+            logger.error("Norwegian Playwright fallback error: %s", e)
+            return self._empty(req)
+        finally:
+            await context.close()
+
+    # ------------------------------------------------------------------
+    # Cookie/consent helpers
     # ------------------------------------------------------------------
 
     async def _dismiss_cookies(self, page) -> None:
@@ -370,110 +498,6 @@ class NorwegianConnectorClient:
             }""")
         except Exception:
             pass
-
-    async def _fill_search_form(self, page, req: FlightSearchRequest) -> None:
-        """Fill the Norwegian homepage search form (one-way, airports, date)."""
-        # Wait for the search form to be interactive
-        try:
-            await page.get_by_role("combobox", name="From").wait_for(
-                state="visible", timeout=10000
-            )
-        except Exception:
-            logger.debug("Norwegian: From combobox not found, trying anyway")
-
-        # Select one-way — click the text label (radio input is covered by label)
-        try:
-            await page.get_by_text("One-way").click(timeout=3000)
-            await asyncio.sleep(0.3)
-        except Exception:
-            logger.debug("Norwegian: could not click One-way")
-
-        # Fill 'From' airport
-        await self._fill_airport_field(page, "From", req.origin)
-        await asyncio.sleep(0.5)
-
-        # Fill 'To' airport
-        await self._fill_airport_field(page, "To", req.destination)
-        await asyncio.sleep(0.5)
-
-        # Fill departure date via calendar picker
-        await self._fill_date(page, req)
-
-    async def _fill_airport_field(self, page, label: str, iata: str) -> None:
-        """Fill an airport combobox and pick the matching option.
-
-        The Norwegian form exposes ``combobox "From"`` / ``combobox "To"``.
-        Typing the IATA code filters the listbox; each option renders as
-        ``button "CityName (IATA) Country"`` inside the listbox.
-        """
-        try:
-            combo = page.get_by_role("combobox", name=label)
-            await combo.click(timeout=3000)
-            await asyncio.sleep(0.3)
-            await combo.fill(iata)
-            await asyncio.sleep(1.5)
-
-            # Click the first option button whose name contains "(IATA)"
-            option_btn = page.get_by_role("button", name=re.compile(
-                rf"\({re.escape(iata)}\)", re.IGNORECASE
-            )).first
-            await option_btn.click(timeout=5000)
-        except Exception as e:
-            logger.debug("Norwegian: %s field error: %s", label, e)
-
-    async def _fill_date(self, page, req: FlightSearchRequest) -> None:
-        """Open the calendar picker, navigate to the correct month, click the day."""
-        target_year = req.date_from.year
-        target_month = req.date_from.month
-        target_day = req.date_from.day
-
-        try:
-            # Click the "Outbound flight" textbox to open the calendar
-            date_box = page.get_by_role("textbox", name="Outbound flight")
-            await date_box.click(timeout=3000)
-            await asyncio.sleep(0.5)
-
-            # Navigate months using the <select> inside the datepicker.
-            # Option values follow the pattern "YYYY-MM-01Txx:xx:xx.xxxZ".
-            target_prefix = f"{target_year}-{target_month:02d}-01T"
-            changed = await page.evaluate(f"""() => {{
-                const sel = document.querySelector('.nas-datepicker select');
-                if (!sel) return 'no select';
-                for (const opt of sel.options) {{
-                    if (opt.value.startsWith('{target_prefix}')) {{
-                        sel.value = opt.value;
-                        sel.dispatchEvent(new Event('change', {{bubbles: true}}));
-                        return 'ok';
-                    }}
-                }}
-                return 'month not found';
-            }}""")
-            if changed != "ok":
-                logger.debug("Norwegian: month select result: %s", changed)
-            await asyncio.sleep(0.5)
-
-            # Click the day button inside the calendar table
-            # The calendar renders buttons with just the day number as name.
-            # Use a narrow locator: table cell button with exact day text.
-            day_btn = page.locator(
-                f".nas-datepicker table button"
-            ).filter(has_text=re.compile(rf"^{target_day}$")).first
-            await day_btn.click(timeout=3000)
-            await asyncio.sleep(0.3)
-        except Exception as e:
-            logger.debug("Norwegian: Date error: %s", e)
-
-    async def _click_search(self, page) -> None:
-        """Click 'Search and book' (enabled only after form is filled)."""
-        try:
-            btn = page.get_by_role("button", name="Search and book")
-            await btn.click(timeout=5000)
-        except Exception:
-            # Fallback: try any submit button
-            try:
-                await page.locator("button[type='submit']").first.click(timeout=3000)
-            except Exception:
-                await page.keyboard.press("Enter")
 
     # ------------------------------------------------------------------
     # Response parsing
