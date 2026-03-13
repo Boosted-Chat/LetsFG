@@ -1,19 +1,17 @@
 """
-SunExpress CDP Chrome scraper — homepage form fill + DOM extraction.
+SunExpress CDP Chrome scraper — direct URL navigation + API interception + DOM extraction.
 
 SunExpress (IATA: XQ) is a Turkish-German low-cost carrier, a joint venture
 of Turkish Airlines and Lufthansa, operating from Turkey and Germany to
 leisure destinations across Europe, Middle East and North Africa.
 
-Strategy (converted Mar 2026):
+Strategy (updated Mar 2026):
 1. Launch real system Chrome via CDP (persistent, avoids launch overhead)
-2. Navigate to sunexpress.com/en-gb homepage (establishes session + cookies)
+2. Navigate directly to sunexpress.com/en-gb/booking/select/?... deep link
+   (bypasses homepage form fill — selectors break with site redesigns)
 3. Dismiss OneTrust cookie banner ("Accept All Cookies" button)
-4. Click "One-way" toggle
-5. Fill origin/destination via combobox
-6. Navigate calendar to target month, click day
-7. Click "Search flights" → wait for /booking/select/
-8. Extract flights from Angular SPA DOM
+4. Intercept API responses from Angular SPA for structured flight data
+5. Fall back to DOM text extraction if API interception finds nothing
 """
 
 from __future__ import annotations
@@ -169,45 +167,55 @@ class SunExpressConnectorClient:
         try:
             page = await context.new_page()
 
-            # ── Step 1: Load homepage (establishes session) ────────────
-            logger.info("SunExpress: loading homepage for %s→%s", req.origin, req.destination)
+            # ── Step 1: Intercept API responses from Angular SPA ────────
+            api_data: list[dict] = []
+
+            async def _on_response(response):
+                try:
+                    url = response.url
+                    if response.status != 200:
+                        return
+                    # Capture JSON responses from flight search/availability APIs
+                    if any(kw in url for kw in (
+                        "/api/", "/availability", "/flight",
+                        "/offer", "/search", "/booking",
+                    )):
+                        ct = response.headers.get("content-type", "")
+                        if "json" in ct:
+                            body = await response.json()
+                            api_data.append({"url": url, "data": body})
+                except Exception:
+                    pass
+
+            page.on("response", _on_response)
+
+            # ── Step 2: Navigate directly to booking results URL ────────
+            # Deep link bypasses homepage form fill (selectors break with
+            # site redesigns). The Angular SPA router handles the URL and
+            # fires its own API calls to fetch flight data.
+            booking_url = self._build_booking_url(req)
+            logger.info("SunExpress: navigating to %s→%s via %s",
+                        req.origin, req.destination, booking_url)
             await page.goto(
-                "https://www.sunexpress.com/en-gb",
+                booking_url,
                 wait_until="domcontentloaded",
                 timeout=int(self.timeout * 1000),
             )
             await asyncio.sleep(2.5)
 
-            # ── Step 2: Dismiss cookie banner ──────────────────────────
+            # ── Step 3: Dismiss cookie banner ──────────────────────────
             await self._dismiss_cookies(page)
             await asyncio.sleep(0.5)
 
-            # ── Step 3: Fill search form ───────────────────────────────
-            ok = await self._fill_search_form(page, req)
-            if not ok:
-                logger.warning("SunExpress: form fill failed")
-                return self._empty(req)
-
-            # ── Step 4: Click search → navigate to results ─────────────
-            await self._click_search(page)
-            try:
-                await page.wait_for_url("**/booking/select/**", timeout=30000)
-                logger.info("SunExpress: navigated to results page")
-            except Exception:
-                # Check current URL — might already be on results
-                cur = page.url
-                logger.info("SunExpress: current URL after search: %s", cur)
-                if "/booking/select" not in cur:
-                    logger.warning("SunExpress: no navigation to results page")
-                    return self._empty(req)
-
-            # ── Step 5: Wait for DOM prices to load ────────────────────
+            # ── Step 4: Wait for prices to load ────────────────────────
             remaining = max(self.timeout - (time.monotonic() - t0), 8)
             prices_loaded = False
             for _ in range(int(remaining)):
                 await asyncio.sleep(1)
                 has_prices = await page.evaluate("""() => {
-                    const els = document.querySelectorAll('[class*="price"]');
+                    const els = document.querySelectorAll(
+                        '[class*="price"], [class*="fare"], [class*="amount"]'
+                    );
                     return Array.from(els).some(e => /[1-9]/.test(e.textContent));
                 }""")
                 if has_prices:
@@ -220,7 +228,15 @@ class SunExpressConnectorClient:
 
             await asyncio.sleep(1.5)
 
-            # ── Step 6: Extract flights from DOM ───────────────────────
+            # ── Step 5: Try structured API data first ──────────────────
+            if api_data:
+                offers = self._parse_api_data(api_data, req)
+                if offers:
+                    elapsed = time.monotonic() - t0
+                    logger.info("SunExpress: parsed %d offers from API interception", len(offers))
+                    return self._build_response(offers, req, elapsed)
+
+            # ── Step 6: Fall back to DOM extraction ────────────────────
             offers = await self._extract_from_dom(page, req)
             elapsed = time.monotonic() - t0
             if offers:
@@ -482,10 +498,188 @@ class SunExpressConnectorClient:
             return
         await page.locator("button[type='submit']").first.click(timeout=3000)
 
+    # ── API response parsing ──────────────────────────────────────────
+
+    def _parse_api_data(self, api_data: list[dict], req: FlightSearchRequest) -> list[FlightOffer]:
+        """Parse structured flight data from intercepted API responses.
+
+        The Angular SPA fetches availability data via XHR.  We inspect each
+        captured JSON blob for arrays of flight/offer/journey objects and
+        extract price, times, and route information.
+        """
+        booking_url = self._build_booking_url(req)
+        date_str = req.date_from.strftime("%Y-%m-%d")
+        offers: list[FlightOffer] = []
+        seen_keys: set[str] = set()
+
+        for entry in api_data:
+            data = entry.get("data")
+            if not data:
+                continue
+
+            # Walk the response looking for iterable collections of flights
+            candidates = self._find_flight_arrays(data)
+            for flights_list in candidates:
+                for item in flights_list:
+                    if not isinstance(item, dict):
+                        continue
+                    offer = self._api_item_to_offer(item, req, date_str, booking_url, seen_keys)
+                    if offer:
+                        offers.append(offer)
+
+        return offers
+
+    def _find_flight_arrays(self, obj: Any, depth: int = 0) -> list[list]:
+        """Recursively find lists that look like flight collections."""
+        if depth > 6:
+            return []
+        results: list[list] = []
+
+        if isinstance(obj, list) and len(obj) > 0:
+            # Check if this list contains flight-like dicts
+            if any(
+                isinstance(item, dict) and any(
+                    k in item for k in (
+                        "price", "totalPrice", "total_price", "amount",
+                        "fare", "fares", "departureTime", "departure_time",
+                        "departure", "segments", "flights", "legs",
+                        "journeyKey", "flightNumber", "flight_number",
+                    )
+                )
+                for item in obj[:5]
+            ):
+                results.append(obj)
+            else:
+                for item in obj[:20]:
+                    results.extend(self._find_flight_arrays(item, depth + 1))
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                results.extend(self._find_flight_arrays(v, depth + 1))
+
+        return results
+
+    def _api_item_to_offer(
+        self, item: dict, req: FlightSearchRequest,
+        date_str: str, booking_url: str, seen: set,
+    ) -> FlightOffer | None:
+        """Convert a single API flight item into a FlightOffer (or None)."""
+        # Extract price from common field names
+        price = None
+        for key in ("price", "totalPrice", "total_price", "amount", "fare",
+                     "basePrice", "base_price", "totalAmount", "total_amount"):
+            val = item.get(key)
+            if isinstance(val, (int, float)) and val > 0:
+                price = float(val)
+                break
+            if isinstance(val, dict):
+                for sub in ("amount", "value", "total", "price"):
+                    sv = val.get(sub)
+                    if isinstance(sv, (int, float)) and sv > 0:
+                        price = float(sv)
+                        break
+                if price:
+                    break
+
+        if not price or price <= 0:
+            return None
+
+        # Currency
+        currency = req.currency or "EUR"
+        for key in ("currency", "currencyCode", "currency_code"):
+            val = item.get(key)
+            if isinstance(val, str) and len(val) == 3:
+                currency = val.upper()
+                break
+
+        # Departure / arrival times
+        dep_time = self._extract_time(item, ("departureTime", "departure_time", "departure", "depTime", "dep"))
+        arr_time = self._extract_time(item, ("arrivalTime", "arrival_time", "arrival", "arrTime", "arr"))
+
+        dep_iata = self._extract_str(item, ("origin", "departureStation", "departure_station", "from")) or req.origin
+        arr_iata = self._extract_str(item, ("destination", "arrivalStation", "arrival_station", "to")) or req.destination
+
+        # Duration
+        duration_sec = 0
+        for key in ("duration", "durationSeconds", "duration_seconds", "travelTime", "travel_time"):
+            val = item.get(key)
+            if isinstance(val, (int, float)) and val > 0:
+                duration_sec = int(val) if val > 300 else int(val * 60)
+                break
+
+        stops = 0
+        for key in ("stops", "stopovers", "numberOfStops"):
+            val = item.get(key)
+            if isinstance(val, int):
+                stops = val
+                break
+
+        # Deduplicate
+        flight_key = f"XQ_{dep_iata}_{arr_iata}_{dep_time}_{price}"
+        if flight_key in seen:
+            return None
+        seen.add(flight_key)
+
+        dep_dt = self._parse_dt(f"{date_str}T{dep_time}" if dep_time and "T" not in dep_time else dep_time or f"{date_str}T00:00")
+        arr_dt = self._parse_dt(f"{date_str}T{arr_time}" if arr_time and "T" not in arr_time else arr_time or f"{date_str}T00:00")
+        if arr_dt <= dep_dt:
+            from datetime import timedelta
+            arr_dt = arr_dt + timedelta(days=1)
+        if duration_sec == 0 and dep_dt and arr_dt:
+            duration_sec = max(int((arr_dt - dep_dt).total_seconds()), 0)
+
+        segment = FlightSegment(
+            airline="XQ", airline_name="SunExpress",
+            flight_no=self._extract_str(item, ("flightNumber", "flight_number", "flightNo", "flight_no")) or "",
+            origin=dep_iata, destination=arr_iata,
+            departure=dep_dt, arrival=arr_dt,
+            cabin_class="M",
+        )
+        route = FlightRoute(segments=[segment], total_duration_seconds=duration_sec, stopovers=stops)
+
+        return FlightOffer(
+            id=f"xq_{hashlib.md5(flight_key.encode()).hexdigest()[:12]}",
+            price=round(price, 2),
+            currency=currency,
+            price_formatted=f"{price:.2f} {currency}",
+            outbound=route, inbound=None,
+            airlines=["SunExpress"], owner_airline="XQ",
+            booking_url=booking_url, is_locked=False,
+            source="sunexpress_direct", source_tier="free",
+        )
+
+    @staticmethod
+    def _extract_time(item: dict, keys: tuple) -> str:
+        """Extract a time string from a dict, trying multiple key names."""
+        for k in keys:
+            val = item.get(k)
+            if isinstance(val, str) and val:
+                # Handle full ISO datetime → extract time portion
+                if "T" in val:
+                    return val
+                m = re.search(r"(\d{1,2}:\d{2})", val)
+                if m:
+                    return m.group(1)
+        return ""
+
+    @staticmethod
+    def _extract_str(item: dict, keys: tuple) -> str:
+        """Extract a string value from a dict, trying multiple key names."""
+        for k in keys:
+            val = item.get(k)
+            if isinstance(val, str) and val:
+                return val
+        return ""
+
     # ── DOM extraction (results page) ──────────────────────────────────
 
     async def _extract_from_dom(self, page, req: FlightSearchRequest) -> list[FlightOffer]:
-        """Parse flight cards from the SunExpress booking/select results page."""
+        """Parse flight cards from the SunExpress booking/select results page.
+
+        Multiple extraction strategies are tried in order:
+        1. Structured DOM elements (data attributes, card containers)
+        2. Original text regex (Departure/Arrival/Duration pattern)
+        3. Broad time + price pairing fallback
+        """
         raw = await page.evaluate(r"""() => {
             const results = [];
             const body = document.body.innerText;
@@ -494,10 +688,47 @@ class SunExpressConnectorClient:
             const currMatch = body.match(/(?:GBP|EUR|USD|TRY|PLN|CHF|SEK|NOK|DKK)/);
             const currency = currMatch ? currMatch[0] : 'EUR';
 
-            // Split body text into flight card sections
-            // Each flight starts with "Select flight" or "Best price"
-            // Pattern: "Departure: HH:MM ... Return: HH:MM ... Duration: Xh Ym ... From PRICE"
-            const flightPattern = /Departure:\s*(\d{1,2}:\d{2})\s*.*?(\w{3})\s+(\w{3})\s*.*?(?:Return|Arrival):\s*(\d{1,2}:\d{2})\s*.*?(\w{3})\s+(\w{3})\s*.*?Duration:\s*([\dhm\s]+?)(?:Nonstop|(\d+)\s*stop).*?(?:From\s*)?(?:[£€$]|GBP|EUR|USD|TRY)?\s*([\d,.]+)/gs;
+            // ── Strategy 1: structured DOM cards ──────────────────────
+            // Many Angular SPAs render flight cards with data attributes or
+            // well-known class names.  Try to read them directly.
+            const cardSels = [
+                '[class*="flight-card"]', '[class*="flightCard"]',
+                '[class*="journey-item"]', '[class*="journeyItem"]',
+                '[class*="flight-row"]',  '[class*="flightRow"]',
+                '[class*="select-flight"]',
+                '[data-flight]', '[data-journey]',
+            ];
+            for (const sel of cardSels) {
+                const cards = document.querySelectorAll(sel);
+                if (cards.length === 0) continue;
+                cards.forEach(card => {
+                    const txt = card.innerText || '';
+                    const timeMatches = txt.match(/\b([01]?\d|2[0-3]):[0-5]\d\b/g) || [];
+                    const priceMatch = txt.match(/(?:[£€$₺]\s*)([\d,.]+)|([\d,.]+)\s*(?:GBP|EUR|USD|TRY)/);
+                    const price = priceMatch
+                        ? parseFloat((priceMatch[1] || priceMatch[2]).replace(/,/g, ''))
+                        : 0;
+                    if (timeMatches.length >= 2 && price > 0) {
+                        const durMatch = txt.match(/(\d+)\s*h\s*(\d+)?\s*m?/);
+                        const hours = durMatch ? parseInt(durMatch[1]) : 0;
+                        const mins = durMatch && durMatch[2] ? parseInt(durMatch[2]) : 0;
+                        const iataMatches = txt.match(/\b([A-Z]{3})\b/g) || [];
+                        results.push({
+                            depTime: timeMatches[0],
+                            arrTime: timeMatches[1],
+                            depIata: iataMatches.length >= 2 ? iataMatches[0] : '',
+                            arrIata: iataMatches.length >= 2 ? iataMatches[1] : '',
+                            duration: hours * 3600 + mins * 60,
+                            stops: 0, price, currency,
+                        });
+                    }
+                });
+                if (results.length > 0) return results;
+            }
+
+            // ── Strategy 2: original text regex ──────────────────────
+            // Pattern: "Departure: HH:MM ... Arrival: HH:MM ... Duration: Xh Ym ... PRICE"
+            const flightPattern = /Departure:\s*(\d{1,2}:\d{2})\s*.*?(\w{3})\s+(\w{3})\s*.*?(?:Return|Arrival):\s*(\d{1,2}:\d{2})\s*.*?(\w{3})\s+(\w{3})\s*.*?Duration:\s*([\dhm\s]+?)(?:Nonstop|(\d+)\s*stop).*?(?:From\s*)?(?:[£€$₺]|GBP|EUR|USD|TRY)?\s*([\d,.]+)/gs;
 
             let m;
             while ((m = flightPattern.exec(body)) !== null) {
@@ -525,24 +756,38 @@ class SunExpressConnectorClient:
                     stops, price, currency
                 });
             }
+            if (results.length > 0) return results;
 
-            // Fallback: simpler extraction if regex didn't match
-            if (results.length === 0) {
-                const times = (body.match(/\b([01]\d|2[0-3]):[0-5]\d\b/g) || []);
-                const prices = (body.match(/(?:[£€$]\s*)([\d,.]+)/g) || [])
-                    .map(p => parseFloat(p.replace(/[£€$\s,]/g, '')))
-                    .filter(p => p > 5 && p < 50000);
-                // Pair times and prices
-                for (let i = 0; i < Math.min(Math.floor(times.length / 2), prices.length); i++) {
-                    results.push({
-                        depTime: times[i * 2],
-                        arrTime: times[i * 2 + 1],
-                        depIata: '', arrIata: '',
-                        duration: 0, stops: 0,
-                        price: prices[i],
-                        currency: currency
-                    });
-                }
+            // ── Strategy 3: relaxed time-arrow-time + price pattern ──
+            // Catches "08:15 → 12:30 ... £89" or "08:15 - 12:30 ... 89.00 EUR"
+            const relaxed = /(\d{1,2}:\d{2})\s*(?:→|->|–|-|―)\s*(\d{1,2}:\d{2})[\s\S]*?(?:[£€$₺]\s*)([\d,.]+)/g;
+            let rm;
+            while ((rm = relaxed.exec(body)) !== null) {
+                const price = parseFloat(rm[3].replace(/,/g, ''));
+                if (isNaN(price) || price <= 0) continue;
+                results.push({
+                    depTime: rm[1], arrTime: rm[2],
+                    depIata: '', arrIata: '',
+                    duration: 0, stops: 0, price, currency,
+                });
+            }
+            if (results.length > 0) return results;
+
+            // ── Strategy 4: broad time + price fallback ──────────────
+            const times = (body.match(/\b([01]?\d|2[0-3]):[0-5]\d\b/g) || []);
+            const prices = (body.match(/(?:[£€$₺]\s*)([\d,.]+)/g) || [])
+                .map(p => parseFloat(p.replace(/[£€$₺\s,]/g, '')))
+                .filter(p => p > 5 && p < 50000);
+            // Pair times and prices
+            for (let i = 0; i < Math.min(Math.floor(times.length / 2), prices.length); i++) {
+                results.push({
+                    depTime: times[i * 2],
+                    arrTime: times[i * 2 + 1],
+                    depIata: '', arrIata: '',
+                    duration: 0, stops: 0,
+                    price: prices[i],
+                    currency: currency
+                });
             }
 
             return results;
