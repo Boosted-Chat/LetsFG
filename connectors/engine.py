@@ -85,6 +85,21 @@ from models.flights import AirlineSummary, FlightOffer, FlightSearchRequest, Fli
 
 logger = logging.getLogger(__name__)
 
+# Connectors that launch Chrome/Playwright browsers.
+# These are throttled by a semaphore to prevent 20+ Chrome processes at once.
+_BROWSER_SOURCES: set[str] = {
+    "airasia_direct", "allegiant_direct", "azul_direct", "batikair_direct",
+    "cebupacific_direct", "condor_direct", "easyjet_direct", "eurowings_direct",
+    "flybondi_direct", "flydubai_direct", "flynas_direct", "frontier_direct",
+    "gol_direct", "indigo_direct", "jet2_direct", "jetsmart_direct",
+    "jetstar_direct", "lionair_direct", "luckyair_direct", "9air_direct",
+    "norwegian_direct", "peach_direct", "pegasus_direct", "play_direct",
+    "porter_direct", "scoot_direct", "smartwings_direct", "southwest_direct",
+    "spirit_direct", "sunexpress_direct", "transavia_direct", "twayair_direct",
+    "vietjet_direct", "volaris_direct", "volotea_direct", "vueling_direct",
+    "zipair_direct",
+}
+
 # Registry of direct airline connectors: (source_name, connector_class, timeout)
 # All are zero-auth, always available, "free" tier.
 _DIRECT_AIRLINE_connectorS: list[tuple[str, type, float]] = [
@@ -464,7 +479,24 @@ class MultiProvider:
             source_tiers=source_tiers,
         )
 
-    # ── Browser cleanup ──────────────────────────────────────────────────────────
+    # ── Per-connector browser cleanup ──────────────────────────────────────────
+
+    async def _cleanup_single_connector(self, client) -> None:
+        """Close a single connector's module-level browser resources immediately.
+
+        Called after a browser-based connector finishes so its Chrome process
+        is freed without waiting for the full search to complete.
+        """
+        from connectors.browser import cleanup_module_browsers
+
+        mod = sys.modules.get(type(client).__module__)
+        if mod:
+            closed = await cleanup_module_browsers(mod)
+            if closed:
+                logger.debug("Early cleanup: closed %d resource(s) for %s",
+                             closed, type(client).__name__)
+
+    # ── Full browser cleanup ─────────────────────────────────────────────────────
 
     async def _cleanup_connectors(self):
         """Close all browser instances launched by connectors during search.
@@ -589,7 +621,15 @@ class MultiProvider:
     async def _search_connector_generic(
         self, client, req: FlightSearchRequest, source: str
     ) -> FlightSearchResponse:
-        """Generic wrapper for direct airline connectors — tags source/tier, ensures cleanup."""
+        """Generic wrapper for direct airline connectors — tags source/tier, ensures cleanup.
+
+        Browser-based connectors are throttled by a semaphore so at most 4
+        Chrome processes run simultaneously (prevents resource exhaustion).
+        """
+        uses_browser = source in _BROWSER_SOURCES
+        if uses_browser:
+            from connectors.browser import acquire_browser_slot
+            await acquire_browser_slot()
         try:
             result = await client.search_flights(req)
             for offer in result.offers:
@@ -598,6 +638,12 @@ class MultiProvider:
             return result
         finally:
             await client.close()
+            if uses_browser:
+                # Close module-level browser globals immediately so Chrome
+                # doesn't linger until the full search completes.
+                await self._cleanup_single_connector(client)
+                from connectors.browser import release_browser_slot
+                release_browser_slot()
 
     def _combo_search_fn(self, label: str):
         """Return the appropriate search method for combo one-way legs."""

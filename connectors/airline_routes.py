@@ -90,7 +90,8 @@ AIRPORT_COUNTRY: dict[str, str] = {
     "JAI": "IN", "GAU": "IN", "IXC": "IN", "SXR": "IN", "ATQ": "IN",
     "LKO": "IN", "PAT": "IN", "BBI": "IN", "IXR": "IN", "CCJ": "IN",
     "TRV": "IN", "IXE": "IN", "VTZ": "IN", "IXB": "IN", "IMF": "IN",
-    "CMB": "LK", "MLE": "MV", "KTM": "NP", "DAC": "BD",
+    "CMB": "LK", "MLE": "MV", "KTM": "NP",
+    "DAC": "BD", "CGP": "BD", "ZYL": "BD", "RJH": "BD", "SPD": "BD", "BZL": "BD",
     "ISB": "PK", "LHE": "PK", "KHI": "PK",
     # Southeast Asia
     "SIN": "SG",

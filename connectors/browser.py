@@ -22,6 +22,32 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# ── Concurrency gate — limits how many browsers can run at once ──────────────
+# Without this, 20+ Chrome processes spawn simultaneously and crash the machine.
+_MAX_CONCURRENT_BROWSERS = 8
+_browser_semaphore: Optional[asyncio.Semaphore] = None
+
+
+async def _get_browser_semaphore() -> asyncio.Semaphore:
+    """Get or create the global browser concurrency semaphore (lazy init)."""
+    global _browser_semaphore
+    if _browser_semaphore is None:
+        _browser_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_BROWSERS)
+    return _browser_semaphore
+
+
+async def acquire_browser_slot():
+    """Acquire a browser slot — blocks if too many browsers are running."""
+    sem = await _get_browser_semaphore()
+    await sem.acquire()
+
+
+def release_browser_slot():
+    """Release a browser slot after a connector finishes with its browser."""
+    if _browser_semaphore is not None:
+        _browser_semaphore.release()
+
+
 # ── Cleanup registry — tracks resources launched by connectors ───────────────
 _launched_procs: list[subprocess.Popen] = []
 _launched_pw_instances: list = []
@@ -396,6 +422,10 @@ async def cleanup_all_browsers():
             except Exception:
                 pass
     _launched_procs.clear()
+
+    # Reset the semaphore so it's fresh for next search
+    global _browser_semaphore
+    _browser_semaphore = None
 
     if closed:
         logger.info("browser.py cleanup: terminated %d browser resources", closed)
