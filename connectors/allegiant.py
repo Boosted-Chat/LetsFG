@@ -5,9 +5,10 @@ Allegiant (IATA: G4) is a US ultra-low-cost carrier operating leisure routes
 from smaller US cities to vacation destinations (Las Vegas, Florida, etc.).
 
 IMPORTANT: Allegiant's website (allegiantair.com) is behind aggressive
-Cloudflare protection that BLOCKS all non-US IP addresses. This scraper
-**requires a US IP address** to function. Configure via the ALLEGIANT_PROXY
-environment variable (e.g. "http://user:pass@us-proxy.example.com:10001").
+Cloudflare protection that BLOCKS all non-US IP addresses. This connector
+**will not work from IP addresses outside the United States**.
+If running outside the US, set the ALLEGIANT_PROXY environment variable to
+an HTTP proxy URL with a US exit IP (e.g. "http://user:pass@proxy:10001").
 
 Website: allegiantair.com — Next.js + Apollo GraphQL SPA.
 Endpoint: POST /graphql with "flights" operation returning FlightOptionFragment
@@ -42,8 +43,6 @@ from models.flights import (
     FlightSearchResponse,
     FlightSegment,
 )
-from connectors.browser import stealth_args
-
 logger = logging.getLogger(__name__)
 
 _VIEWPORTS = [
@@ -124,7 +123,12 @@ _ctx_ready = False
 
 
 def _get_proxy() -> Optional[dict]:
-    """Read proxy config from ALLEGIANT_PROXY env var."""
+    """Read proxy from ALLEGIANT_PROXY env var.
+
+    Allegiant geo-blocks all non-US IP addresses. If you are outside the US,
+    set ALLEGIANT_PROXY to an HTTP proxy URL with a US exit IP, e.g.
+    ALLEGIANT_PROXY="http://user:pass@us-proxy.example.com:10001"
+    """
     raw = os.environ.get("ALLEGIANT_PROXY", "").strip()
     if not raw:
         return None
@@ -152,16 +156,37 @@ def _get_ctx_lock() -> asyncio.Lock:
     return _ctx_lock
 
 
-async def _get_browser():
-    """Shared headed Chrome (launched once, reused)."""
+async def _get_browser(proxy: Optional[dict] = None):
+    """Shared headed Chrome with proxy (launched once, reused).
+
+    Must be headed (not headless) — Cloudflare blocks headless browsers,
+    and HTTPS proxy tunnels fail in Chromium headless mode.
+    """
     global _pw_instance, _browser
     lock = _get_lock()
     async with lock:
         if _browser and _browser.is_connected():
             return _browser
-        from connectors.browser import launch_headed_browser
-        _browser = await launch_headed_browser()
-        logger.info("Allegiant: browser launched")
+        from playwright.async_api import async_playwright
+        _pw_instance = await async_playwright().start()
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--window-position=-2400,-2400",
+            "--window-size=1366,768",
+        ]
+        launch_kw: dict = {
+            "headless": False,
+            "channel": "chrome",
+            "args": launch_args,
+        }
+        if proxy:
+            launch_kw["proxy"] = proxy
+        try:
+            _browser = await _pw_instance.chromium.launch(**launch_kw)
+        except Exception:
+            launch_kw.pop("channel", None)
+            _browser = await _pw_instance.chromium.launch(**launch_kw)
+        logger.info("Allegiant: headed Chrome launched (proxy=%s)", bool(proxy))
         return _browser
 
 
@@ -201,7 +226,7 @@ async def _ensure_warm_ctx(proxy: dict):
         if _ctx_ready and _warm_ctx:
             return _warm_ctx
 
-        browser = await _get_browser()
+        browser = await _get_browser(proxy)
         if _warm_ctx:
             try:
                 await _warm_ctx.close()
@@ -211,8 +236,8 @@ async def _ensure_warm_ctx(proxy: dict):
         vp = random.choice(_VIEWPORTS)
         tz = random.choice(_TIMEZONES)
 
+        # Proxy is set at browser level — no need to repeat here
         _warm_ctx = await browser.new_context(
-            proxy=proxy,
             viewport=vp,
             locale="en-US",
             timezone_id=tz,
@@ -278,11 +303,7 @@ class AllegiantConnectorClient:
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
         proxy = _get_proxy()
         if not proxy:
-            logger.error(
-                "Allegiant: ALLEGIANT_PROXY env var not set. "
-                "This scraper requires a US IP address. "
-                "Set ALLEGIANT_PROXY=http://user:pass@us-proxy:port"
-            )
+            logger.error("Allegiant: no proxy available (set ALLEGIANT_PROXY env var)")
             return self._empty(req)
 
         t0 = time.monotonic()

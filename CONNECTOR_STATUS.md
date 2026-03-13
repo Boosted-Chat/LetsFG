@@ -64,7 +64,7 @@
 | 10 | jet2 | LS | [#32](https://github.com/Boosted-Chat/BoostedTravel/issues/32) | `done` | copilot-eurowings-fix | 2026-03-13T21:30Z | persistent headed Chrome for Akamai bypass |
 | 11 | jetsmart | JA | — | `done` | copilot-batikair-fix | 2026-03-13T21:17Z | Already fixed — timetable API. Tested SCL→LIM (1 offer, 60790 CLP, 2.1s). |
 | 12 | jetstar | JQ | [#31](https://github.com/Boosted-Chat/BoostedTravel/issues/31) | `done` | copilot-eurowings-fix | 2026-03-14T00:00Z | CDP Chrome + Kasada warm-up bypass |
-| 13 | lionair | JT | [#35](https://github.com/Boosted-Chat/BoostedTravel/issues/35) | `blocked` | copilot-main | 2026-03-13T22:00Z | IBE2 booking engine dead (0-byte responses), booking.lionair.co.id connection refused |
+| 13 | lionair | JT | [#35](https://github.com/Boosted-Chat/BoostedTravel/issues/35) | `removed` | copilot-main | 2026-03-14T12:00Z | booking.lionair.co.id connection refused (IBE2 dead), connector removed |
 | 14 | luckyair | 8L | — | `done` | copilot-eurowings-fix | 2026-03-14T01:15Z | timeout enforcement + cleanup |
 | 15 | nineair | AQ | — | `done` | copilot-eurowings-fix | 2026-03-14T01:25Z | timeout + cleanup (works CAN→HRB 5 offers) |
 | 16 | norwegian | DY | [#22](https://github.com/Boosted-Chat/BoostedTravel/issues/22) | `done` | copilot-batikair-fix | 2026-03-13T21:17Z | Headed CDP Chrome for Incapsula cookies; 20 offers OSL→LGW 1.1s cached |
@@ -87,8 +87,8 @@
 
 | # | Connector | IATA | Issue | Status | Reason |
 |---|-----------|------|-------|--------|--------|
-| 26 | allegiant | G4 | [#38](https://github.com/Boosted-Chat/BoostedTravel/issues/38) | `blocked` | Requires US proxy (ALLEGIANT_PROXY env var) |
-| 27 | southwest | WN | [#26](https://github.com/Boosted-Chat/BoostedTravel/issues/26) | `blocked` | API returns 500/403, needs US proxy |
+| 26 | allegiant | G4 | [#38](https://github.com/Boosted-Chat/BoostedTravel/issues/38) | `done` | **US IP required.** Headed Chrome + GraphQL interception. Set ALLEGIANT_PROXY if outside US. |
+| 27 | southwest | WN | [#26](https://github.com/Boosted-Chat/BoostedTravel/issues/26) | `done` | **US IP required.** Headed Chrome + Playwright form fill + API interception. Set SOUTHWEST_PROXY if outside US. |
 | 28 | spirit | NK | [#28](https://github.com/Boosted-Chat/BoostedTravel/issues/28) | `blocked` | PerimeterX blocks all automated access |
 | 29 | smartwings | QS | [#23](https://github.com/Boosted-Chat/BoostedTravel/issues/23) | `done` | Headed CDP Chrome + CF Turnstile bypass (launch with URL before CDP attaches) |
 | 30 | transavia | HV | [#25](https://github.com/Boosted-Chat/BoostedTravel/issues/25) | `blocked` | 403 on booking page |
@@ -106,6 +106,21 @@
 | 37 | vivaaerobus | VB | `done` | copilot-batikair-fix | 2026-03-14T04:00Z | Validated working — 7 offers MEX→CUN 1082.95 MXN |
 | 38 | vueling | VY | `done` | copilot-batikair-fix | 2026-03-14T04:00Z | Validated working — 6 offers BCN→FCO 45.90 EUR |
 | 39 | zipair | ZG | `done` | copilot-batikair-fix | 2026-03-14T04:00Z | Validated working — 2 offers NRT→ICN 24160 JPY |
+
+### New US Market Connectors (10)
+
+| # | Connector | IATA | Type | Status | Reason |
+|---|-----------|------|------|--------|--------|
+| 40 | jetblue | B6 | LCC | `broken` | **US IP required.** 114 destinations, dominates Northeast + Caribbean + transatlantic budget. jetblue.com SPA. |
+| 41 | breeze | MX | LCC | `broken` | **US IP required.** 75 destinations, unique unserved city pairs (A220 fleet). flybreeze.com. |
+| 42 | avelo | XP | ULCC | `broken` | **US IP required.** Ultra-low fares $19-59, serves small airports (New Haven, Wilmington DE). aveloair.com. |
+| 43 | suncountry | SY | ULCC | `broken` | **US IP required.** 81+ destinations from MSP hub, best low-cost carrier NA. suncountry.com. |
+| 44 | alaska | AS | Major | `broken` | **US IP required.** West Coast dominant + Hawaii monopoly (post-Hawaiian merger). alaskaair.com. |
+| 45 | hawaiian | HA | Major | `broken` | **US IP required.** Hawaii inter-island + mainland-Hawaii + Asia/Pacific. hawaiianairlines.com. |
+| 46 | american | AA | Major | `broken` | **US IP required.** Largest airline worldwide, every US city pair. aa.com — complex SPA. |
+| 47 | united | UA | Major | `broken` | **US IP required.** 2nd largest US carrier, massive hub network. united.com — complex SPA. |
+| 48 | delta | DL | Major | `broken` | **US IP required.** 3rd largest US carrier, ATL world's busiest hub. delta.com — complex SPA. |
+| 49 | jsx | XE | Premium | `broken` | **US IP required.** Semi-private $100-400/seat, FBO terminals (no TSA). jsx.com. |
 
 ---
 

@@ -18,7 +18,9 @@ API details:
   POST https://www.southwest.com/api/mobile-air-booking/page/air/booking/shopping
   Body: {originationAirportCode, destinationAirportCode, departureDate, ...}
   Response: JSON with flightShoppingPage > outboundPage > cards
-  Geo-restriction: US IPs only — proxy required for both API and browser paths
+  Geo-restriction: US IPs only — non-US IP addresses cannot access southwest.com.
+  If running outside the US, set the SOUTHWEST_PROXY environment variable to
+  an HTTP proxy URL with a US exit IP address.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import random
 import re
 import time
@@ -38,7 +41,7 @@ try:
 except ImportError:
     HAS_CURL = False
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -73,6 +76,38 @@ _UA = (
 )
 _COOKIE_MAX_AGE = 15 * 60  # Re-farm cookies after 15 minutes
 
+def _get_proxy_url() -> str:
+    """Read proxy URL from SOUTHWEST_PROXY env var.
+
+    Southwest geo-blocks all non-US IP addresses for both the website and API.
+    If you are outside the US, set SOUTHWEST_PROXY to an HTTP proxy URL with
+    a US exit IP, e.g. SOUTHWEST_PROXY="http://user:pass@us-proxy.example.com:10003"
+    """
+    return os.environ.get("SOUTHWEST_PROXY", "").strip()
+
+
+def _get_pw_proxy() -> Optional[dict]:
+    """Parse proxy URL into Playwright proxy dict."""
+    raw = _get_proxy_url()
+    if not raw:
+        return None
+    from urllib.parse import urlparse
+    p = urlparse(raw)
+    result: dict[str, str] = {"server": f"{p.scheme}://{p.hostname}:{p.port}"}
+    if p.username:
+        result["username"] = p.username
+    if p.password:
+        result["password"] = p.password
+    return result
+
+
+def _get_curl_proxies() -> dict:
+    """Return curl_cffi-style proxies dict."""
+    url = _get_proxy_url()
+    if not url:
+        return {}
+    return {"http": url, "https": url}
+
 # -- Shared cookie farm state --
 _farm_lock: Optional[asyncio.Lock] = None
 _farmed_cookies: list[dict] = []
@@ -98,16 +133,37 @@ def _get_farm_lock() -> asyncio.Lock:
 
 
 async def _get_browser():
-    """Shared headed Chromium for cookie farming and Playwright fallback (launched once, reused)."""
+    """Shared headed Chrome with US proxy (launched once, reused).
+
+    Must be headed (not headless) — Southwest's Akamai bot detection blocks
+    headless browsers, and HTTPS proxy tunnels can fail in headless mode.
+    """
     global _browser
     lock = _get_lock()
     async with lock:
         if _browser and _browser.is_connected():
             return _browser
 
-        from boostedtravel.connectors.browser import launch_headed_browser
-        _browser = await launch_headed_browser()
-        logger.info("Southwest: browser launched for hybrid flow")
+        from playwright.async_api import async_playwright
+        pw = await async_playwright().start()
+        launch_kw: dict = {
+            "headless": False,
+            "channel": "chrome",
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--window-position=-2400,-2400",
+                "--window-size=1366,768",
+            ],
+        }
+        proxy = _get_pw_proxy()
+        if proxy:
+            launch_kw["proxy"] = proxy
+        try:
+            _browser = await pw.chromium.launch(**launch_kw)
+        except Exception:
+            launch_kw.pop("channel", None)
+            _browser = await pw.chromium.launch(**launch_kw)
+        logger.info("Southwest: headed Chrome launched (proxy=%s)", bool(proxy))
         return _browser
 
 
@@ -185,6 +241,7 @@ class SouthwestConnectorClient:
     def _bootstrap_session_sync() -> list[dict]:
         """Synchronous: visit southwest.com homepage to capture session cookies."""
         sess = cffi_requests.Session(impersonate=_IMPERSONATE)
+        proxies = _get_curl_proxies()
         try:
             r = sess.get(
                 _HOMEPAGE_URL,
@@ -195,6 +252,7 @@ class SouthwestConnectorClient:
                 },
                 timeout=15,
                 allow_redirects=True,
+                proxies=proxies,
             )
             if r.status_code == 200:
                 cookies = []
@@ -331,10 +389,12 @@ class SouthwestConnectorClient:
             "X-Channel-Id": "southwest",
         }
 
+        proxies = _get_curl_proxies()
+
         # Try primary endpoint, then mobile endpoint
         for url in [_SEARCH_URL, _MOBILE_SEARCH_URL]:
             try:
-                r = sess.post(url, json=body, headers=headers, timeout=15)
+                r = sess.post(url, json=body, headers=headers, timeout=15, proxies=proxies)
             except Exception as e:
                 logger.debug("Southwest: API request to %s failed: %s", url, e)
                 continue
