@@ -45,7 +45,7 @@ from models.flights import (
     FlightSearchResponse,
     FlightSegment,
 )
-from connectors.browser import stealth_args, stealth_position_arg, stealth_popen_kwargs
+from connectors.browser import find_chrome, stealth_popen_kwargs, _launched_procs
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ def _get_lock() -> asyncio.Lock:
 
 
 async def _get_browser():
-    """Launch real Chrome via CDP, or fall back to Playwright headed.
+    """Launch real headed Chrome via CDP (Akamai blocks headless).
 
     Uses a persistent user-data-dir so Akamai clearance persists across runs.
     """
@@ -94,17 +94,46 @@ async def _get_browser():
             except Exception:
                 pass
 
-        try:
-            from connectors.browser import get_or_launch_cdp
-            _browser, _chrome_proc = await get_or_launch_cdp(_DEBUG_PORT, _USER_DATA_DIR)
-            logger.info("Scoot: Chrome ready via CDP (port %d)", _DEBUG_PORT)
-            return _browser
-        except Exception as e:
-            logger.warning("Scoot: CDP failed: %s, falling back to Playwright", e)
+        from playwright.async_api import async_playwright
 
-        from connectors.browser import launch_headed_browser
-        _browser = await launch_headed_browser()
-        logger.info("Scoot: Playwright browser launched (fallback)")
+        # Try connecting to existing Chrome on the port first
+        pw = None
+        try:
+            pw = await async_playwright().start()
+            _browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{_DEBUG_PORT}")
+            _pw_instance = pw
+            logger.info("Scoot: connected to existing Chrome on port %d", _DEBUG_PORT)
+            return _browser
+        except Exception:
+            if pw:
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+
+        # Launch Chrome HEADED (no --headless) — Akamai blocks headless Chrome.
+        chrome = find_chrome()
+        os.makedirs(_USER_DATA_DIR, exist_ok=True)
+        args = [
+            chrome,
+            f"--remote-debugging-port={_DEBUG_PORT}",
+            f"--user-data-dir={_USER_DATA_DIR}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-http2",
+            "--window-position=-2400,-2400",
+            "--window-size=1366,768",
+            "about:blank",
+        ]
+        _chrome_proc = subprocess.Popen(args, **stealth_popen_kwargs())
+        _launched_procs.append(_chrome_proc)
+        await asyncio.sleep(2.0)
+
+        pw = await async_playwright().start()
+        _pw_instance = pw
+        _browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{_DEBUG_PORT}")
+        logger.info("Scoot: Chrome launched headed on CDP port %d (pid %d)", _DEBUG_PORT, _chrome_proc.pid)
         return _browser
 
 

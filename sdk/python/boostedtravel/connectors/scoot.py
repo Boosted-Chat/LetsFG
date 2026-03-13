@@ -45,7 +45,7 @@ from boostedtravel.models.flights import (
     FlightSearchResponse,
     FlightSegment,
 )
-from boostedtravel.connectors.browser import stealth_args, stealth_position_arg, stealth_popen_kwargs
+from boostedtravel.connectors.browser import stealth_popen_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -97,10 +97,9 @@ def _get_lock() -> asyncio.Lock:
 
 
 async def _get_browser():
-    """Launch real Chrome via subprocess + connect via CDP.
+    """Launch real headed Chrome via CDP (Akamai blocks headless).
 
     Uses a persistent user-data-dir so Akamai clearance persists across runs.
-    Falls back to regular Playwright launch if Chrome is not found.
     """
     global _pw_instance, _browser, _chrome_proc
     lock = _get_lock()
@@ -114,66 +113,47 @@ async def _get_browser():
 
         from playwright.async_api import async_playwright
 
-        if _pw_instance:
-            try:
-                await _pw_instance.stop()
-            except Exception:
-                pass
-        _pw_instance = await async_playwright().start()
-
-        chrome_path = _find_chrome()
-        if chrome_path:
-            os.makedirs(_USER_DATA_DIR, exist_ok=True)
-            # Try connecting to existing Chrome first
-            try:
-                _browser = await _pw_instance.chromium.connect_over_cdp(
-                    f"http://localhost:{_DEBUG_PORT}"
-                )
-                logger.info("Scoot: connected to existing Chrome via CDP")
-                return _browser
-            except Exception:
-                pass
-
-            vp = random.choice(_VIEWPORTS)
-            _chrome_proc = subprocess.Popen(
-                [
-                    chrome_path,
-                    f"--remote-debugging-port={_DEBUG_PORT}",
-                    f"--user-data-dir={_USER_DATA_DIR}",
-                    f"--window-size={vp['width']},{vp['height']}",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--disable-background-networking",
-                    *stealth_position_arg(),
-                    "about:blank",
-                ],
-                **stealth_popen_kwargs(),
-            )
-            await asyncio.sleep(2.5)
-            try:
-                _browser = await _pw_instance.chromium.connect_over_cdp(
-                    f"http://localhost:{_DEBUG_PORT}"
-                )
-                logger.info("Scoot: connected to real Chrome via CDP (port %d)", _DEBUG_PORT)
-                return _browser
-            except Exception as e:
-                logger.warning("Scoot: CDP connect failed: %s, falling back", e)
-                if _chrome_proc:
-                    _chrome_proc.terminate()
-                    _chrome_proc = None
-
-        # Fallback: regular Playwright headed Chrome
+        # Try connecting to existing Chrome on the port first
+        pw = None
         try:
-            _browser = await _pw_instance.chromium.launch(
-                headless=True, channel="chrome",
-                args=["--disable-blink-features=AutomationControlled", *stealth_args()],
-            )
+            pw = await async_playwright().start()
+            _browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{_DEBUG_PORT}")
+            _pw_instance = pw
+            logger.info("Scoot: connected to existing Chrome on port %d", _DEBUG_PORT)
+            return _browser
         except Exception:
-            _browser = await _pw_instance.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox", *stealth_args()],
-            )
-        logger.info("Scoot: Playwright browser launched (headed Chrome, fallback)")
+            if pw:
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+
+        # Launch Chrome HEADED (no --headless) — Akamai blocks headless Chrome.
+        chrome_path = _find_chrome()
+        if not chrome_path:
+            raise RuntimeError("Chrome not found — required for Scoot (Akamai bypass)")
+        os.makedirs(_USER_DATA_DIR, exist_ok=True)
+        _chrome_proc = subprocess.Popen(
+            [
+                chrome_path,
+                f"--remote-debugging-port={_DEBUG_PORT}",
+                f"--user-data-dir={_USER_DATA_DIR}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-http2",
+                "--window-position=-2400,-2400",
+                "--window-size=1366,768",
+                "about:blank",
+            ],
+            **stealth_popen_kwargs(),
+        )
+        await asyncio.sleep(2.0)
+
+        pw = await async_playwright().start()
+        _pw_instance = pw
+        _browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{_DEBUG_PORT}")
+        logger.info("Scoot: Chrome launched headed on CDP port %d (pid %d)", _DEBUG_PORT, _chrome_proc.pid)
         return _browser
 
 
