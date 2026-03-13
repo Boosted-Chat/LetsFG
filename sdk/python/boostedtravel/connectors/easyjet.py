@@ -258,11 +258,13 @@ class EasyjetConnectorClient:
                     ct = response.headers.get("content-type", "")
                     if response.status != 200 or "json" not in ct:
                         return
-                    if not any(k in url for k in (
-                        "/api/query", "/api/search", "/funnel/api/",
-                        "availability", "flights/search",
-                        "easyjet" if "flight" in url else "",
-                    )):
+                    if not (
+                        any(k in url for k in (
+                            "/api/query", "/api/search", "/funnel/api/",
+                            "availability", "flights/search",
+                        ))
+                        or ("easyjet" in url and "flight" in url)
+                    ):
                         return
                     data = await response.json()
                     if not data or not isinstance(data, dict):
@@ -280,8 +282,8 @@ class EasyjetConnectorClient:
                             response.url[:120],
                             list(data.keys())[:8],
                         )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("easyJet: response handler error: %s", exc)
 
             page.on("response", _on_response)
 
