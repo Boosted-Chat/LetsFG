@@ -1,23 +1,14 @@
 """
-AirAsia Playwright scraper -- navigates to airasia.com and searches flights.
+AirAsia Playwright scraper -- direct URL navigation + API interception.
 
 AirAsia (IATA: AK) is a Malaysian super-LCC operating across Asia-Pacific.
-Uses a Navitaire-based booking engine. Heavy Akamai/Datadome bot protection.
+Uses a Navitaire-based booking engine with Akamai bot protection.
 
 Strategy:
-1. Navigate to airasia.com/en/gb homepage (English version)
-2. Dismiss cookie consent banner
-3. Fill search form (origin, destination, date, one-way)
-4. Intercept API responses (Navitaire availability/search endpoints)
-5. Parse results -> FlightOffers
-
-Homepage observations (Mar 2026):
-- Cookie banner: "We use cookies..." dismiss via button then JS removal
-- Search form: "From" / "To" / "Depart" / "Return" fields
-- Trip type: "Round-trip" default -- need to switch to "One-way"
-- Search button: "Search Flights" (accessible button)
-- Autocomplete: Dropdown with airport suggestions after typing IATA
-- API: Navitaire-style calls to availability/search/fares endpoints
+1. Launch Chrome in headed mode (--headless=new is detected by Akamai)
+2. Navigate directly to the search results URL
+3. Intercept the aggregated-results JSON API response
+4. Parse searchResults.trips[].flightsList[] → FlightOffers
 """
 
 from __future__ import annotations
@@ -25,15 +16,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import os
 import random
-import re
-import subprocess
 import time
 from datetime import datetime
 from typing import Any, Optional
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -56,10 +44,9 @@ _TIMEZONES = [
     "Asia/Jakarta", "Asia/Manila",
 ]
 
-# ── Shared browser singleton via CDP ────────────────────────────────────
-_CDP_PORT = 9457
-_chrome_proc = None
+# ── Shared browser singleton ─────────────────────────────────────────────
 _browser = None
+_pw_instance = None
 _browser_lock: Optional[asyncio.Lock] = None
 
 
@@ -71,36 +58,30 @@ def _get_lock() -> asyncio.Lock:
 
 
 async def _get_browser():
-    """Connect to a real Chrome instance via CDP (launched once, reused)."""
-    global _chrome_proc, _browser
+    """Launch Chrome in headed mode (off-screen) — AirAsia's Akamai bot
+    protection returns empty API bodies when ``--headless=new`` is used."""
+    global _browser, _pw_instance
     lock = _get_lock()
     async with lock:
         if _browser and _browser.is_connected():
             return _browser
         from playwright.async_api import async_playwright
-
-        from boostedtravel.connectors.browser import find_chrome, stealth_args, stealth_popen_kwargs
-        chrome_path = find_chrome()
-        user_data = os.path.join(os.environ.get("TEMP", "/tmp"), "chrome-cdp-airasia")
-        _chrome_proc = subprocess.Popen([
-            chrome_path,
-            f"--remote-debugging-port={_CDP_PORT}",
-            f"--user-data-dir={user_data}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-blink-features=AutomationControlled",
-            *stealth_args(),
-        ], **stealth_popen_kwargs())
-        await asyncio.sleep(1.5)
-
-        pw = await async_playwright().start()
-        _browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{_CDP_PORT}")
-        logger.info("AirAsia: Connected to real Chrome via CDP (port %d)", _CDP_PORT)
+        _pw_instance = await async_playwright().start()
+        _browser = await _pw_instance.chromium.launch(
+            headless=False,
+            channel="chrome",
+            args=[
+                "--window-position=-2400,-2400",
+                "--window-size=800,600",
+                "--disable-http2",
+            ],
+        )
+        logger.info("AirAsia: headed Chrome launched (off-screen)")
         return _browser
 
 
 class AirAsiaConnectorClient:
-    """AirAsia Playwright scraper -- homepage form search + API interception."""
+    """AirAsia Playwright scraper -- direct URL navigation + response interception."""
 
     def __init__(self, timeout: float = 45.0):
         self.timeout = timeout
@@ -126,12 +107,6 @@ class AirAsiaConnectorClient:
             except ImportError:
                 page = await context.new_page()
 
-            try:
-                cdp = await context.new_cdp_session(page)
-                await cdp.send("Network.setCacheDisabled", {"cacheDisabled": True})
-            except Exception:
-                pass
-
             captured_data: dict = {}
             api_event = asyncio.Event()
 
@@ -139,75 +114,58 @@ class AirAsiaConnectorClient:
                 try:
                     url = response.url.lower()
                     ct = response.headers.get("content-type", "")
-                    if "json" in ct and (
-                        "aggregated-results" in url
-                        or "availability" in url
-                        or "search/flights" in url
-                        or "low-fare" in url
-                    ):
-                        data = await response.json()
-                        if isinstance(data, dict) and "searchResults" in data:
+                    if "json" not in ct:
+                        return
+                    if any(p in url for p in (
+                        "aggregated-results", "availability",
+                        "search/flights", "low-fare",
+                    )):
+                        body = await response.body()
+                        if len(body) < 100:
+                            return  # Skip 206 partial / empty responses
+                        import json as _json
+                        data = _json.loads(body)
+                        if isinstance(data, dict) and (
+                            "searchResults" in data
+                            or "trips" in data
+                            or "flights" in data
+                        ):
                             captured_data["json"] = data
                             captured_data["url"] = response.url
                             api_event.set()
-                            logger.info("AirAsia: captured flight data from %s (status=%d)", response.url[:120], response.status)
+                            logger.info("AirAsia: captured %d bytes from %s", len(body), response.url[:120])
                 except Exception:
                     pass
 
             page.on("response", on_response)
 
-            logger.info("AirAsia: loading homepage for %s->%s", req.origin, req.destination)
+            # Navigate directly to search results URL (skip form fill)
+            search_url = self._build_search_url(req)
+            logger.info("AirAsia: navigating to search URL for %s->%s", req.origin, req.destination)
             await page.goto(
-                "https://www.airasia.com/en/gb",
+                search_url,
                 wait_until="domcontentloaded",
                 timeout=int(self.timeout * 1000),
             )
-            await asyncio.sleep(3.0)
-
-            await self._dismiss_cookies(page)
-            await asyncio.sleep(0.5)
-            await self._dismiss_cookies(page)
-
-            await self._set_one_way(page)
-            await asyncio.sleep(0.5)
-
-            ok = await self._fill_airport_field(page, "From", req.origin, 0)
-            if not ok:
-                logger.warning("AirAsia: origin fill failed")
-                return self._empty(req)
-            await asyncio.sleep(0.5)
-
-            ok = await self._fill_airport_field(page, "To", req.destination, 1)
-            if not ok:
-                logger.warning("AirAsia: destination fill failed")
-                return self._empty(req)
-            await asyncio.sleep(0.5)
-
-            ok = await self._fill_date(page, req)
-            if not ok:
-                logger.warning("AirAsia: date fill failed")
-                return self._empty(req)
-            await asyncio.sleep(0.3)
-
-            await self._click_search(page)
 
             remaining = max(self.timeout - (time.monotonic() - t0), 10)
             try:
                 await asyncio.wait_for(api_event.wait(), timeout=remaining)
             except asyncio.TimeoutError:
                 logger.warning("AirAsia: timed out waiting for API response")
-                offers = await self._extract_from_dom(page, req)
+
+            data = captured_data.get("json")
+            if data:
+                elapsed = time.monotonic() - t0
+                offers = self._parse_response(data, req)
                 if offers:
-                    return self._build_response(offers, req, time.monotonic() - t0)
-                return self._empty(req)
+                    return self._build_response(offers, req, elapsed)
 
-            data = captured_data.get("json", {})
-            if not data:
-                return self._empty(req)
-
-            elapsed = time.monotonic() - t0
-            offers = self._parse_response(data, req)
-            return self._build_response(offers, req, elapsed)
+            # Fallback: DOM extraction from __NEXT_DATA__ etc.
+            offers = await self._extract_from_dom(page, req)
+            if offers:
+                return self._build_response(offers, req, time.monotonic() - t0)
+            return self._empty(req)
 
         except Exception as e:
             logger.error("AirAsia Playwright error: %s", e)
@@ -215,192 +173,34 @@ class AirAsiaConnectorClient:
         finally:
             await context.close()
 
-    async def _dismiss_cookies(self, page) -> None:
-        for label in [
-            "Accept all cookies", "Accept All", "Accept", "I agree",
-            "Got it", "OK", "Close", "Dismiss", "Agree",
-        ]:
-            try:
-                btn = page.get_by_role("button", name=re.compile(rf"^{re.escape(label)}$", re.IGNORECASE))
-                if await btn.count() > 0:
-                    await btn.first.click(timeout=2000)
-                    await asyncio.sleep(0.5)
-                    return
-            except Exception:
-                continue
-        try:
-            await page.evaluate("""() => {
-                document.querySelectorAll(
-                    '[class*="cookie"], [id*="cookie"], [class*="consent"], [id*="consent"], ' +
-                    '[class*="Cookie"], [id*="Cookie"], [class*="onetrust"], [id*="onetrust"], ' +
-                    '[class*="modal-overlay"], [class*="popup"], [id*="popup"], ' +
-                    '[class*="privacy"], [id*="privacy"]'
-                ).forEach(el => { if (el.offsetHeight > 0) el.remove(); });
-                document.body.style.overflow = 'auto';
-            }""")
-        except Exception:
-            pass
-
-    async def _set_one_way(self, page) -> None:
-        """Click trip-type dropdown (#home_triptype) and select 'One-way'."""
-        try:
-            # Close calendar overlay if open (it intercepts pointer events)
-            close_btn = page.locator("[class*='CloseCalendar']")
-            if await close_btn.count() > 0:
-                await close_btn.first.click(timeout=1000)
-                await asyncio.sleep(0.3)
-        except Exception:
-            pass
-        try:
-            await page.click("#home_triptype", timeout=3000)
-            await asyncio.sleep(0.5)
-            # Find "One-way" text inside the dropdown
-            ow = page.locator("#home_triptype").get_by_text("One-way", exact=True)
-            if await ow.count() > 0:
-                await ow.first.click(timeout=3000)
-                logger.info("AirAsia: set one-way via dropdown")
-                return
-            # Fallback: any element below triptype with One-way text
-            ow = page.locator("#home_triptype p, #home_triptype li, #home_triptype div").filter(
-                has_text=re.compile(r"One.?way", re.IGNORECASE)
-            ).last
-            if await ow.count() > 0:
-                await ow.click(timeout=3000)
-                return
-        except Exception as e:
-            logger.debug("AirAsia: one-way toggle error: %s", e)
-
-    async def _fill_airport_field(self, page, label: str, iata: str, index: int) -> bool:
-        """Fill origin (index=0) or destination (index=1) using specific AirAsia input IDs."""
-        try:
-            if index == 0:
-                field = page.locator("input#flight-place-picker")
-            else:
-                field = page.locator("input#home_flyingfrom")
-            await field.click(timeout=3000)
-            await asyncio.sleep(0.3)
-            await field.fill("")
-            await asyncio.sleep(0.2)
-            await field.fill(iata)
-            await asyncio.sleep(2.5)
-            # Click autocomplete suggestion -- LI with Dropdown__Option class
-            suggestion = page.locator("li[class*='Dropdown__Option']").filter(
-                has_text=re.compile(rf"{re.escape(iata)}", re.IGNORECASE)
-            ).first
-            if await suggestion.count() > 0:
-                await suggestion.click(timeout=3000)
-                logger.info("AirAsia: selected %s from autocomplete for %s", iata, label)
-                return True
-            # Fallback: any visible LI containing the IATA code
-            suggestion = page.locator("li:visible").filter(
-                has_text=re.compile(rf"{re.escape(iata)}", re.IGNORECASE)
-            ).first
-            if await suggestion.count() > 0:
-                await suggestion.click(timeout=3000)
-                return True
-            await page.keyboard.press("Enter")
-            return True
-        except Exception as e:
-            logger.debug("AirAsia: %s field error: %s", label, e)
-            return False
-
-    async def _fill_date(self, page, req: FlightSearchRequest) -> bool:
-        """Open AirAsia calendar via #departclick-handle, navigate months, click day div.
-
-        Calendar day cells use id='div-YYYY-M-D' where M is 0-indexed (Jan=0).
-        Month headers are in calendarInstance__CalendarHeaderItem divs.
-        Navigation arrows: #lefticon (prev) / #righticon (next).
-        """
-        target = req.date_from
-        try:
-            await page.click("#departclick-handle", timeout=3000)
-            await asyncio.sleep(1.0)
-
-            target_my = target.strftime("%B %Y")  # e.g. "April 2026"
-            for _ in range(12):
-                headers = await page.locator(
-                    "[class*='CalendarHeaderItem']"
-                ).all_text_contents()
-                if any(target_my in h for h in headers):
-                    break
-                try:
-                    await page.click("#righticon", timeout=2000)
-                    await asyncio.sleep(0.5)
-                except Exception:
-                    break
-
-            # Calendar uses 0-indexed months: Jan=0, Feb=1, Mar=2 ...
-            month_0 = target.month - 1
-            day_id = f"div-{target.year}-{month_0}-{target.day}"
-            await page.click(f"#{day_id}", timeout=3000)
-            await asyncio.sleep(0.5)
-            logger.info("AirAsia: selected date %s via calendar", target.strftime("%Y-%m-%d"))
-
-            # Close the calendar -- it stays open after date pick and blocks search
-            try:
-                close = page.locator("[class*='CloseCalendar']")
-                if await close.count() > 0:
-                    await close.first.click(timeout=2000)
-                    await asyncio.sleep(0.3)
-            except Exception:
-                try:
-                    await page.keyboard.press("Escape")
-                    await asyncio.sleep(0.3)
-                except Exception:
-                    pass
-
-            return True
-        except Exception as e:
-            logger.warning("AirAsia: date error: %s", e)
-            return False
-
-    async def _click_search(self, page) -> None:
-        """Click search -- AirAsia uses <a id='home_Search'> not a <button>."""
-        # Ensure calendar overlay is closed first
-        try:
-            close = page.locator("[class*='CloseCalendar']")
-            if await close.count() > 0:
-                await close.first.click(timeout=1000)
-                await asyncio.sleep(0.3)
-        except Exception:
-            pass
-        try:
-            await page.click("a#home_Search", timeout=5000)
-            logger.info("AirAsia: clicked search")
-            return
-        except Exception:
-            pass
-        # Fallback: try by aria-label
-        try:
-            link = page.locator("[aria-label*='Search Flights' i]")
-            if await link.count() > 0:
-                await link.first.click(timeout=5000)
-                return
-        except Exception:
-            pass
-        # Last resort
-        try:
-            await page.locator("a:has-text('Search'), button:has-text('Search')").first.click(timeout=3000)
-        except Exception:
-            await page.keyboard.press("Enter")
-
     async def _extract_from_dom(self, page, req: FlightSearchRequest) -> list[FlightOffer]:
-        """Fallback: extract from __NEXT_DATA__ (AirAsia uses Next.js SSR)."""
+        """Fallback: extract from __NEXT_DATA__ or re-parsed script tags."""
         try:
             await asyncio.sleep(5)
             data = await page.evaluate("""() => {
-                if (window.__NEXT_DATA__) {
-                    const pr = window.__NEXT_DATA__?.props?.pageProps;
-                    if (pr?.aggregatorResponse) return pr.aggregatorResponse;
-                    return window.__NEXT_DATA__;
+                // Check __NEXT_DATA__ pageProps.aggregatorResponse first
+                const pp = window.__NEXT_DATA__?.props?.pageProps;
+                if (pp?.aggregatorResponse) {
+                    const sr = pp.aggregatorResponse.searchResults;
+                    if (sr && sr.trips) return pp.aggregatorResponse;
                 }
-                if (window.__NUXT__) return window.__NUXT__;
-                const scripts = document.querySelectorAll('script[type="application/json"], script[id="__NEXT_DATA__"]');
+                // Re-parse the __NEXT_DATA__ script tag (may be updated by hydration)
+                const ndEl = document.getElementById('__NEXT_DATA__');
+                if (ndEl) {
+                    try {
+                        const nd = JSON.parse(ndEl.textContent);
+                        const ar = nd?.props?.pageProps?.aggregatorResponse;
+                        if (ar?.searchResults?.trips) return ar;
+                    } catch {}
+                }
+                // Check other script tags
+                const scripts = document.querySelectorAll('script[type="application/json"]');
                 for (const s of scripts) {
                     try {
                         const d = JSON.parse(s.textContent);
-                        if (d && (d.flights || d.journeys || d.fares || d.availability || d.searchResults)) return d;
-                        if (d?.props?.pageProps?.aggregatorResponse) return d.props.pageProps.aggregatorResponse;
+                        if (d?.searchResults?.trips) return d;
+                        if (d?.props?.pageProps?.aggregatorResponse?.searchResults?.trips)
+                            return d.props.pageProps.aggregatorResponse;
                     } catch {}
                 }
                 return null;
@@ -619,10 +419,24 @@ class AirAsiaConnectorClient:
 
     @staticmethod
     def _build_booking_url(req: FlightSearchRequest) -> str:
-        dep = req.date_from.strftime("%Y-%m-%d")
+        dep = req.date_from.strftime("%d/%m/%Y")
         return (
-            f"https://www.airasia.com/flights/search?origin={req.origin}"
-            f"&destination={req.destination}&departDate={dep}&pax={req.adults}&tripType=O"
+            f"https://www.airasia.com/flights/search/?origin={req.origin}"
+            f"&destination={req.destination}&departDate={dep}"
+            f"&tripType=O&adult={req.adults}&child=0&infant=0"
+            f"&locale=en-gb&currency={req.currency}"
+        )
+
+    @staticmethod
+    def _build_search_url(req: FlightSearchRequest) -> str:
+        dep = req.date_from.strftime("%d/%m/%Y")
+        return (
+            f"https://www.airasia.com/flights/search/"
+            f"?origin={req.origin}&destination={req.destination}"
+            f"&departDate={dep}&tripType=O"
+            f"&adult={req.adults}&child=0&infant=0"
+            f"&locale=en-gb&currency={req.currency}"
+            f"&airlineProfile=k,d,g&type=paired&cabinClass=economy&uce=true"
         )
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
