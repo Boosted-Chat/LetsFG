@@ -1,31 +1,31 @@
 """
-Azul Brazilian Airlines scraper — warm CDP Chrome + navigate + API intercept.
+Azul Brazilian Airlines scraper — headed Chrome + route interception + API capture.
 
 Azul (IATA: AD) is Brazil's third-largest airline with the widest domestic network.
 Website: www.voeazul.com.br — English version at /us/en/home.
 
 Architecture:
 - React SPA frontend with Navitaire/New Skies backend
-- Akamai Bot Manager protects the availability API
-- Booking URL triggers SPA to fire availability API automatically
-- No form automation needed — direct URL navigation
+- Akamai Bot Manager blocks headless Chrome and non-browser HTTP
+- SPA sends empty criteria to availability API regardless of URL params
+- Route interception rewrites the empty payload with correct NSK-format criteria
 
 Strategy:
-1. Launch real Chrome via CDP (Akamai blocks bundled Chromium)
-2. Warm context: load homepage to establish Akamai _abck cookie
-3. Per search: navigate to booking URL → SPA fires availability API → intercept response
-4. Parse Navitaire availability format → FlightOffer objects
+1. Launch persistent headed Chrome (Akamai blocks headless)
+2. Per search: set up route interception → navigate to booking URL
+3. Route handler rewrites SPA's empty criteria with correct payload
+4. Capture availability response → parse Navitaire format → FlightOffer objects
 
-Performance: ~5-8s first search (Chrome + Akamai), ~3-5s subsequent searches.
+Performance: ~5-8s first search (Chrome launch), ~3-5s subsequent searches.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
-import subprocess
 import time
 from datetime import datetime
 from typing import Any, Optional
@@ -37,132 +37,77 @@ from models.flights import (
     FlightSearchResponse,
     FlightSegment,
 )
-from connectors.browser import stealth_args, stealth_popen_kwargs
 
 logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────
 
-_AZUL_HOME = "https://www.voeazul.com.br/us/en/home"
 _AVAIL_API = "reservationavailability/api/reservation/availability"
 _MAX_ATTEMPTS = 3
-_API_WAIT = 20  # seconds to wait for availability API per attempt
+_API_WAIT = 30  # seconds to wait for availability API per attempt
 
-_CDP_PORT = 9467
 _USER_DATA_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", ".azul_chrome_data"
 )
 
-# ── Module-level warm state ──────────────────────────────────────────────
+# ── Persistent browser context (headed to bypass Akamai) ────────────────
 
-_chrome_proc: Optional[subprocess.Popen] = None
-_warm_ctx = None          # BrowserContext
-_ctx_ready = False
-_ctx_lock: Optional[asyncio.Lock] = None
+_pw_instance = None
+_pw_context = None
+_browser_lock: Optional[asyncio.Lock] = None
 
 
 def _get_lock() -> asyncio.Lock:
-    global _ctx_lock
-    if _ctx_lock is None:
-        _ctx_lock = asyncio.Lock()
-    return _ctx_lock
+    global _browser_lock
+    if _browser_lock is None:
+        _browser_lock = asyncio.Lock()
+    return _browser_lock
 
 
-async def _wait_akamai(page, timeout: float = 15) -> bool:
-    """Wait for Akamai teapot challenge to clear."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            text = await page.evaluate("() => document.body.innerText.substring(0, 300)")
-            if "teapot" not in text.lower():
-                return True
-        except Exception:
-            pass
-        await asyncio.sleep(1.5)
-    return False
-
-
-async def _ensure_warm_ctx(force: bool = False):
-    """Ensure a warm browser context with Akamai cookies established."""
-    global _warm_ctx, _ctx_ready
-
+async def _get_context():
+    """
+    Persistent headed Chrome context — cookies survive across searches
+    so the Akamai challenge only needs to pass once.
+    """
+    global _pw_instance, _pw_context
     lock = _get_lock()
     async with lock:
-        if _ctx_ready and _warm_ctx and not force:
+        if _pw_context:
             try:
-                # Quick health check
-                pages = _warm_ctx.pages
-                if pages is not None:
-                    return _warm_ctx
+                _pw_context.pages
+                return _pw_context
             except Exception:
-                _ctx_ready = False
+                _pw_context = None
 
-        # Launch Chrome & connect via CDP
-        from connectors.browser import get_or_launch_cdp
-        _user_data = os.path.abspath(_USER_DATA_DIR)
-        browser, _chrome_proc = await get_or_launch_cdp(_CDP_PORT, _user_data)
+        from playwright.async_api import async_playwright
 
-        # Create fresh context
-        ctx = await browser.new_context(
+        os.makedirs(os.path.abspath(_USER_DATA_DIR), exist_ok=True)
+        _pw_instance = await async_playwright().start()
+
+        _pw_context = await _pw_instance.chromium.launch_persistent_context(
+            os.path.abspath(_USER_DATA_DIR),
+            channel="chrome",
+            headless=False,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--window-position=-2400,-2400",
+                "--window-size=1366,768",
+            ],
             viewport={"width": 1366, "height": 768},
             locale="en-US",
             timezone_id="America/Sao_Paulo",
             service_workers="block",
         )
-        _warm_ctx = ctx
-
-        # Warm up: load homepage to get Akamai _abck cookie
-        page = await ctx.new_page()
-        try:
-            from playwright_stealth import stealth_async
-            await stealth_async(page)
-        except ImportError:
-            pass
-
-        logger.info("Azul: warming context (homepage for Akamai cookies)...")
-        await page.goto(_AZUL_HOME, wait_until="domcontentloaded", timeout=60000)
-        await asyncio.sleep(5)
-
-        # Check for Akamai teapot
-        akamai_ok = await _wait_akamai(page, timeout=15)
-        if not akamai_ok:
-            logger.warning("Azul: Akamai teapot on homepage, retrying...")
-            await asyncio.sleep(8)
-            await page.reload(wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(5)
-            akamai_ok = await _wait_akamai(page, timeout=15)
-            if not akamai_ok:
-                logger.error("Azul: Akamai blocked after retry")
-                _ctx_ready = False
-                await page.close()
-                raise RuntimeError("Akamai blocked")
-
-        # Dismiss cookie/LGPD banners
-        try:
-            await page.evaluate("""() => {
-                document.querySelectorAll(
-                    '[class*="cookie"],[id*="cookie"],[class*="consent"],[id*="consent"],'
-                    + '[class*="onetrust"],[id*="onetrust"],[class*="lgpd"],[class*="privacy"]'
-                ).forEach(el => { if (el.offsetHeight > 0) el.remove(); });
-                const btns = [...document.querySelectorAll('button')];
-                const accept = btns.find(b =>
-                    /accept|aceitar|got it|ok|agree/i.test(b.textContent));
-                if (accept) accept.click();
-            }""")
-        except Exception:
-            pass
-
-        await page.close()
-        _ctx_ready = True
-        logger.info("Azul: warm context ready (Akamai cookies established)")
-        return _warm_ctx
+        logger.info("Azul: persistent Chrome context ready")
+        return _pw_context
 
 
 class AzulConnectorClient:
-    """Azul scraper — warm CDP Chrome + navigate + Navitaire API intercept.
+    """Azul scraper — headed Chrome + route interception + API capture.
 
-    Uses real Chrome (Akamai blocks bundled Chromium). Browser launched once,
-    reused across searches. ~3-5s per search after warm-up.
+    Uses persistent headed Chrome (Akamai blocks headless). Browser launched once,
+    reused across searches. SPA sends empty criteria which route interception
+    rewrites with the correct NSK-format payload. ~3-5s per search after launch.
     """
 
     def __init__(self, timeout: float = 60.0):
@@ -181,35 +126,59 @@ class AzulConnectorClient:
                     return result
             except Exception as e:
                 logger.warning("Azul: attempt %d/%d error: %s", attempt, _MAX_ATTEMPTS, e)
-                if "closed" in str(e).lower() or "disconnected" in str(e).lower():
-                    global _ctx_ready
-                    _ctx_ready = False
 
         return self._empty(req)
 
     async def _attempt_search(
         self, req: FlightSearchRequest, t0: float
     ) -> Optional[FlightSearchResponse]:
-        """Single attempt: fresh page in warm context → navigate → intercept API."""
-        ctx = await _ensure_warm_ctx()
+        """Single attempt: fresh page + route interception → navigate → capture API."""
+        ctx = await _get_context()
 
         booking_url = self._build_booking_url(req)
+        dep = req.date_from.strftime("%Y-%m-%d")
 
-        # Fresh page per search (inherits Akamai cookies, clean SPA state)
+        # Build correct NSK criteria payload (SPA sends empty criteria)
+        correct_payload = json.dumps({
+            "criteria": [{
+                "DepartureStation": req.origin,
+                "ArrivalStation": req.destination,
+                "Std": dep + "T00:00:00",
+            }],
+            "passengers": [{"type": "ADT", "count": req.adults}],
+            "flexibleDays": {"daysToLeft": 0, "daysToRight": 0},
+            "currencyCode": "BRL",
+        })
+
+        # Fresh page per search
         page = await ctx.new_page()
-        try:
-            from playwright_stealth import stealth_async
-            await stealth_async(page)
-        except ImportError:
-            pass
 
-        # Set up API response interception
+        # Route interception: rewrite empty criteria with correct payload
+        async def intercept_avail(route):
+            request = route.request
+            if request.method == "POST" and "v5/availability" in request.url:
+                post_data = request.post_data
+                if post_data:
+                    try:
+                        pd = json.loads(post_data)
+                        if not pd.get("criteria"):
+                            await route.continue_(post_data=correct_payload)
+                            return
+                    except Exception:
+                        pass
+                await route.continue_()
+            else:
+                await route.continue_()
+
+        await page.route("**/b2c-api.voeazul.com.br/**/availability**", intercept_avail)
+
+        # Capture API response
         captured: dict = {}
         api_event = asyncio.Event()
 
         async def on_response(response):
             try:
-                if _AVAIL_API not in response.url:
+                if "v5/availability" not in response.url:
                     return
                 if response.status != 200:
                     return
@@ -225,21 +194,14 @@ class AzulConnectorClient:
 
         page.on("response", on_response)
 
-        dep = req.date_from.strftime("%Y-%m-%d")
-        logger.info("Azul: searching %s→%s on %s (fresh page)", req.origin, req.destination, dep)
+        logger.info("Azul: searching %s→%s on %s", req.origin, req.destination, dep)
 
         try:
             await page.goto(
                 booking_url,
-                wait_until="domcontentloaded",
-                timeout=int(self.timeout * 1000),
+                wait_until="commit",
+                timeout=60000,
             )
-
-            # Check for Akamai teapot (usually passes immediately with warm cookies)
-            akamai_ok = await _wait_akamai(page, timeout=10)
-            if not akamai_ok:
-                logger.warning("Azul: Akamai teapot on search page")
-                return None
 
             # Wait for availability API response
             await asyncio.wait_for(api_event.wait(), timeout=_API_WAIT)
@@ -253,6 +215,10 @@ class AzulConnectorClient:
         finally:
             try:
                 page.remove_listener("response", on_response)
+            except Exception:
+                pass
+            try:
+                await page.unroute("**/b2c-api.voeazul.com.br/**/availability**")
             except Exception:
                 pass
             try:
@@ -274,36 +240,15 @@ class AzulConnectorClient:
         booking_url = self._build_booking_url(req)
         offers: list[FlightOffer] = []
 
-        trips = data.get("trips") or data.get("data", {}).get("trips") or []
+        trips = data.get("data", {}).get("trips") or data.get("trips") or []
         for trip in trips:
-            journeys = trip.get("journeysAvailable") or trip.get("journeys") or []
+            journeys = trip.get("journeys") or trip.get("journeysAvailable") or []
+            if not isinstance(journeys, list):
+                continue
             for journey in journeys:
                 offer = self._parse_journey(journey, req, booking_url)
                 if offer:
                     offers.append(offer)
-
-        if offers:
-            return offers
-
-        # Fallback: flatter structures
-        journeys = (
-            data.get("journeysAvailable") or data.get("journeys")
-            or data.get("flights") or data.get("outboundFlights")
-            or data.get("availability", {}).get("trips", [])
-            or data.get("data", {}).get("journeys", [])
-            or data.get("flightList", []) or []
-        )
-        if isinstance(journeys, dict):
-            journeys = journeys.get("outbound", []) or list(journeys.values())
-        if not isinstance(journeys, list):
-            journeys = []
-
-        for journey in journeys:
-            if not isinstance(journey, dict):
-                continue
-            offer = self._parse_journey(journey, req, booking_url)
-            if offer:
-                offers.append(offer)
 
         return offers
 
@@ -317,7 +262,8 @@ class AzulConnectorClient:
 
         currency = self._extract_currency(journey) or "BRL"
 
-        designator = journey.get("designator", {})
+        # Azul v5 uses "identifier" instead of "designator"
+        identifier = journey.get("identifier") or journey.get("designator") or {}
         segments_raw = journey.get("segments", [])
         segments: list[FlightSegment] = []
 
@@ -326,19 +272,26 @@ class AzulConnectorClient:
                 segments.append(self._parse_segment(seg, req))
         else:
             dep_str = (
-                designator.get("departure") or journey.get("departureDateTime")
-                or journey.get("departure") or ""
+                identifier.get("std") or identifier.get("departure")
+                or journey.get("departureDateTime") or ""
             )
             arr_str = (
-                designator.get("arrival") or journey.get("arrivalDateTime")
-                or journey.get("arrival") or ""
+                identifier.get("sta") or identifier.get("arrival")
+                or journey.get("arrivalDateTime") or ""
             )
-            origin = designator.get("origin") or journey.get("origin") or req.origin
-            dest = designator.get("destination") or journey.get("destination") or req.destination
-            flight_no = str(journey.get("flightNumber") or journey.get("flight_no") or "")
+            origin = (
+                identifier.get("departureStation") or identifier.get("origin")
+                or req.origin
+            )
+            dest = (
+                identifier.get("arrivalStation") or identifier.get("destination")
+                or req.destination
+            )
+            carrier = identifier.get("carrierCode") or "AD"
+            flight_num = str(identifier.get("flightNumber") or "")
             segments.append(FlightSegment(
-                airline="AD", airline_name="Azul",
-                flight_no=f"AD{flight_no}" if flight_no else "",
+                airline=carrier, airline_name="Azul",
+                flight_no=f"{carrier}{flight_num}" if flight_num else "",
                 origin=origin, destination=dest,
                 departure=self._parse_dt(dep_str), arrival=self._parse_dt(arr_str),
                 cabin_class="M",
@@ -352,10 +305,11 @@ class AzulConnectorClient:
             diff = (segments[-1].arrival - segments[0].departure).total_seconds()
             total_dur = int(diff) if diff > 0 else 0
 
-        stops = journey.get("stops", max(len(segments) - 1, 0))
+        connections = identifier.get("connections")
+        stops = len(connections) if isinstance(connections, list) else max(len(segments) - 1, 0)
         route = FlightRoute(segments=segments, total_duration_seconds=total_dur, stopovers=stops)
 
-        journey_key = journey.get("journeyKey") or journey.get("id") or ""
+        journey_key = journey.get("journeyKey") or ""
         if not journey_key and segments:
             journey_key = f"{segments[0].departure.isoformat()}_{segments[0].flight_no}"
 
@@ -370,22 +324,35 @@ class AzulConnectorClient:
         )
 
     def _parse_segment(self, seg: dict, req: FlightSearchRequest) -> FlightSegment:
-        """Parse a Navitaire segment (with nested designator/flightDesignator)."""
-        designator = seg.get("designator", {})
-        flight_des = seg.get("flightDesignator", {})
+        """Parse a Navitaire segment."""
+        # Azul v5 uses "identifier" for segment-level info
+        identifier = seg.get("identifier") or seg.get("designator") or {}
+        flight_des = seg.get("flightDesignator") or {}
 
         dep_str = (
-            designator.get("departure") or seg.get("departureDateTime")
-            or seg.get("departure") or seg.get("std") or ""
+            identifier.get("std") or identifier.get("departure")
+            or seg.get("departureDateTime") or seg.get("std") or ""
         )
         arr_str = (
-            designator.get("arrival") or seg.get("arrivalDateTime")
-            or seg.get("arrival") or seg.get("sta") or ""
+            identifier.get("sta") or identifier.get("arrival")
+            or seg.get("arrivalDateTime") or seg.get("sta") or ""
         )
-        origin = designator.get("origin") or seg.get("origin") or seg.get("departureStation") or req.origin
-        dest = designator.get("destination") or seg.get("destination") or seg.get("arrivalStation") or req.destination
-        carrier = flight_des.get("carrierCode") or seg.get("carrierCode") or seg.get("airline") or "AD"
-        flight_num = str(flight_des.get("flightNumber") or seg.get("flightNumber") or seg.get("number") or "")
+        origin = (
+            identifier.get("departureStation") or identifier.get("origin")
+            or seg.get("departureStation") or req.origin
+        )
+        dest = (
+            identifier.get("arrivalStation") or identifier.get("destination")
+            or seg.get("arrivalStation") or req.destination
+        )
+        carrier = (
+            identifier.get("carrierCode") or flight_des.get("carrierCode")
+            or seg.get("carrierCode") or "AD"
+        )
+        flight_num = str(
+            identifier.get("flightNumber") or flight_des.get("flightNumber")
+            or seg.get("flightNumber") or ""
+        )
 
         dep = self._parse_dt(dep_str)
         arr = self._parse_dt(arr_str)
@@ -403,46 +370,14 @@ class AzulConnectorClient:
         """Extract the cheapest fare price from a Navitaire journey."""
         best = float("inf")
 
-        fares = journey.get("fares", [])
-        for fare in fares:
+        for fare in journey.get("fares", []):
             if not isinstance(fare, dict):
                 continue
-            for pf in fare.get("passengerFares", []):
-                fa = pf.get("fareAmount")
-                if fa is not None:
-                    try:
-                        v = float(fa)
-                        if 0 < v < best:
-                            best = v
-                    except (TypeError, ValueError):
-                        pass
-                charges = pf.get("serviceCharges", [])
-                total_charge = 0.0
-                for charge in charges:
-                    try:
-                        total_charge += float(charge.get("amount", 0))
-                    except (TypeError, ValueError):
-                        pass
-                if total_charge > 0 and total_charge < best:
-                    best = total_charge
-                pf_val = pf.get("publishedFare")
-                if pf_val is not None:
-                    try:
-                        v = float(pf_val)
-                        if 0 < v < best:
-                            best = v
-                    except (TypeError, ValueError):
-                        pass
-
-        # Flat fare structures
-        if best == float("inf"):
-            for fare in fares:
-                if not isinstance(fare, dict):
-                    continue
-                for key in ["price", "amount", "totalPrice", "total", "fareAmount", "totalAmount"]:
-                    val = fare.get(key)
-                    if isinstance(val, dict):
-                        val = val.get("amount") or val.get("total") or val.get("value")
+            # Azul v5 uses "paxFares" with "totalAmount"
+            pax_fares = fare.get("paxFares") or fare.get("passengerFares") or []
+            for pf in pax_fares:
+                for key in ("totalAmount", "originalAmount", "fareAmount"):
+                    val = pf.get(key)
                     if val is not None:
                         try:
                             v = float(val)
@@ -450,17 +385,15 @@ class AzulConnectorClient:
                                 best = v
                         except (TypeError, ValueError):
                             pass
-
-        # Journey-level price fields
-        for key in ["price", "lowestFare", "totalPrice", "amount", "lowestPrice", "farePrice"]:
-            p = journey.get(key)
-            if p is not None:
-                try:
-                    v = float(p) if not isinstance(p, dict) else float(p.get("amount") or p.get("total", 0))
-                    if 0 < v < best:
-                        best = v
-                except (TypeError, ValueError):
-                    pass
+                # serviceCharges fallback
+                total_charge = 0.0
+                for charge in pf.get("serviceCharges", []):
+                    try:
+                        total_charge += float(charge.get("amount", 0))
+                    except (TypeError, ValueError):
+                        pass
+                if total_charge > 0 and total_charge < best:
+                    best = total_charge
 
         return best if best < float("inf") else None
 
@@ -469,7 +402,10 @@ class AzulConnectorClient:
         for fare in journey.get("fares", []):
             if not isinstance(fare, dict):
                 continue
-            for pf in fare.get("passengerFares", []):
+            for pf in fare.get("paxFares") or fare.get("passengerFares") or []:
+                cc = pf.get("currencyCode")
+                if cc:
+                    return cc
                 for charge in pf.get("serviceCharges", []):
                     cc = charge.get("currencyCode")
                     if cc:
