@@ -46,7 +46,7 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -90,7 +90,7 @@ async def _get_browser():
     async with lock:
         if _browser and _browser.is_connected():
             return _browser
-        from boostedtravel.connectors.browser import get_or_launch_cdp
+        from connectors.browser import get_or_launch_cdp
         _user_data = os.path.join(os.environ.get("TEMP", "/tmp"), "chrome-cdp-vietjet")
         _browser, _chrome_proc = await get_or_launch_cdp(_CDP_PORT, _user_data)
         logger.info("VietJet: Chrome ready via CDP (port %d)", _CDP_PORT)

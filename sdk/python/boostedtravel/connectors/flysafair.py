@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 import httpx
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,

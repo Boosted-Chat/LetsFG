@@ -328,6 +328,19 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
     "jejuair": {"KR", "JP", "TW", "PH", "VN", "TH", "SG", "MY", "GU"},
     "twayair": {"KR", "JP", "TW", "VN", "TH", "PH", "SG", "GU"},
     "batikair": {"ID", "MY", "SG", "TH", "AU"},
+    "thai": {
+        "TH", "JP", "KR", "CN", "HK", "TW", "SG", "MY", "ID", "VN",
+        "KH", "LA", "MM", "PH", "IN", "LK", "BD", "NP", "PK", "AU",
+        "GB", "DE", "FR", "IT", "CH", "AT", "DK", "SE", "NO", "BE",
+        "TR",
+    },
+    "korean": {
+        "KR", "JP", "CN", "HK", "TW", "SG", "TH", "VN", "KH", "PH",
+        "MY", "ID", "IN", "LK", "BD", "NP", "MN", "UZ", "KZ", "AU",
+        "US", "CA", "GB", "FR", "DE", "IT", "NL", "CH", "AT", "CZ",
+        "HU", "PL", "HR", "SE", "DK", "FI", "ES", "TR", "IL", "AE",
+        "RU", "NZ",
+    },
 
     # ── Middle East / Africa / India ──
     "flydubai": {
@@ -398,6 +411,13 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
         "ZA", "KE", "ET", "NG", "GH", "SN", "CI", "TZ", "MZ", "MU",
         "CM", "GA", "CG", "CD", "SD", "DJ", "SO", "MG", "RW", "UG",
     },
+    "nh": {
+        "JP", "US", "CA", "MX",
+        "GB", "FR", "DE", "IT", "BE", "AT", "SE",
+        "CN", "HK", "TW", "KR",
+        "TH", "MY", "SG", "ID", "VN", "PH", "KH", "MM", "IN",
+        "AU",
+    },
     "emirates": {
         "AE", "SA", "QA", "KW", "BH", "OM", "EG", "JO", "LB", "IQ", "IR",
         "PK", "IN", "LK", "BD", "NP", "MV",
@@ -438,26 +458,6 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
         "GB", "FR", "DE", "IT", "ES", "NL", "CH", "DK", "SE", "TR",
         "US",
         "ZA", "KE",
-    },
-    "thai": {
-        "TH", "JP", "KR", "CN", "HK", "TW", "SG", "MY", "ID", "VN",
-        "KH", "LA", "MM", "PH", "IN", "LK", "BD", "NP", "PK", "AU",
-        "GB", "DE", "FR", "IT", "CH", "AT", "DK", "SE", "NO", "BE",
-        "TR",
-    },
-    "korean": {
-        "KR", "JP", "CN", "HK", "TW", "SG", "TH", "VN", "KH", "PH",
-        "MY", "ID", "IN", "LK", "BD", "NP", "MN", "UZ", "KZ", "AU",
-        "US", "CA", "GB", "FR", "DE", "IT", "NL", "CH", "AT", "CZ",
-        "HU", "PL", "HR", "SE", "DK", "FI", "ES", "TR", "IL", "AE",
-        "RU", "NZ",
-    },
-    "nh": {
-        "JP", "US", "CA", "MX",
-        "GB", "FR", "DE", "IT", "BE", "AT", "SE",
-        "CN", "HK", "TW", "KR",
-        "TH", "MY", "SG", "ID", "VN", "PH", "KH", "MM", "IN",
-        "AU",
     },
 }
 

@@ -30,14 +30,14 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from boostedtravel.connectors.browser import find_chrome, stealth_popen_kwargs
+from connectors.browser import find_chrome, stealth_popen_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ def _get_proxy_config() -> Optional[dict]:
     return None
 
 
-# ── Shared browser singleton ─────────────────────────────────────────
+# ── Shared browser singleton ────────────────────────────────────────────
 _browser = None
 _pw_instance = None
 _chrome_proc = None
@@ -236,7 +236,7 @@ async def _reset_browser():
             _pw_instance = None
 
 
-# ── Stealth init script (runs before page JS) ────────────────────────────────────────
+# ── Stealth init script (runs before page JS) ──────────────────────────
 _STEALTH_INIT_SCRIPT = """
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 try { delete navigator.__proto__.webdriver; } catch(e) {}
@@ -409,6 +409,7 @@ class SpiritConnectorClient:
         ok = await self._fill_date(page, req)
         if not ok:
             logger.warning("Spirit: date fill failed — trying direct URL")
+            # Fall back to direct booking URL navigation
             booking_url = self._build_booking_url(req)
             try:
                 await page.goto(booking_url, wait_until="domcontentloaded",

@@ -37,7 +37,7 @@ from typing import Any, Optional
 
 from curl_cffi import requests as creq
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -82,7 +82,7 @@ async def _get_browser():
     async with lock:
         if _browser and _browser.is_connected():
             return _browser
-        from boostedtravel.connectors.browser import launch_headed_browser
+        from connectors.browser import launch_headed_browser
         _browser = await launch_headed_browser()
         logger.info("Zipair: browser launched")
         return _browser

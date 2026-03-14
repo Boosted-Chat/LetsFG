@@ -31,7 +31,7 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -85,25 +85,10 @@ async def _get_browser():
     async with lock:
         if _browser and _browser.is_connected():
             return _browser
-        from playwright.async_api import async_playwright
-
-        from boostedtravel.connectors.browser import find_chrome, stealth_args, stealth_popen_kwargs
-        chrome_path = find_chrome()
-        user_data = os.path.join(os.environ.get("TEMP", "/tmp"), "chrome-cdp-jetsmart")
-        _chrome_proc = subprocess.Popen([
-            chrome_path,
-            f"--remote-debugging-port={_CDP_PORT}",
-            f"--user-data-dir={user_data}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-blink-features=AutomationControlled",
-            *stealth_args(),
-        ], **stealth_popen_kwargs())
-        await asyncio.sleep(1.5)
-
-        pw = await async_playwright().start()
-        _browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{_CDP_PORT}")
-        logger.info("JetSMART: Connected to real Chrome via CDP (port %d)", _CDP_PORT)
+        from connectors.browser import get_or_launch_cdp
+        _user_data = os.path.join(os.environ.get("TEMP", "/tmp"), "chrome-cdp-jetsmart")
+        _browser, _chrome_proc = await get_or_launch_cdp(_CDP_PORT, _user_data)
+        logger.info("JetSMART: Chrome ready via CDP (port %d)", _CDP_PORT)
         return _browser
 
 

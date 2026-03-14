@@ -1,18 +1,18 @@
 """
-GOL Linhas Aéreas hybrid scraper — CDP Chrome + Angular navigation.
+GOL Linhas Aereas hybrid scraper -- headed Chrome + Angular navigation.
 
 GOL (IATA: G3) is Brazil's largest low-cost carrier.
-Website: b2c.voegol.com.br — Angular SPA booking flow.
+Website: b2c.voegol.com.br -- Angular SPA booking flow.
 
-Strategy (CDP Chrome + Angular navigation):
-1. Launch real Chrome via CDP subprocess (bypasses Akamai Bot Manager)
-2. Navigate to b2c.voegol.com.br/compra once — Angular boots
-3. For each search: inject sessionStorage search params → navigate to results page
-   → Angular resolver fires BFF request → intercept response
+Strategy (persistent headed Chrome + Angular navigation):
+1. Launch persistent headed Chrome (Akamai blocks headless)
+2. Navigate to b2c.voegol.com.br/compra once -- Angular boots
+3. For each search: inject sessionStorage search params -> navigate to results page
+   -> Angular resolver fires BFF request -> intercept response
 4. Navigate back to /compra for next search
-5. Parse offers → FlightOffer objects
+5. Parse offers -> FlightOffer objects
 
-Persistent page kept alive — first search ~8s (Angular boot), subsequent ~3-5s.
+Persistent page kept alive -- first search ~8s (Angular boot), subsequent ~3-5s.
 """
 
 from __future__ import annotations
@@ -21,30 +21,25 @@ import asyncio
 import hashlib
 import logging
 import os
-import shutil
-import subprocess
 import time
 from datetime import datetime
 from typing import Any, Optional
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from boostedtravel.connectors.browser import stealth_args, stealth_popen_kwargs
 
 logger = logging.getLogger(__name__)
 
 _GOL_BASE = "https://b2c.voegol.com.br"
-_CDP_PORT = 9447
 _USER_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", ".gol_chrome_data")
 
 _pw_instance = None
-_cdp_browser = None
-_chrome_proc = None
+_pw_context = None
 _persistent_page = None
 _page_lock: Optional[asyncio.Lock] = None
 
@@ -56,68 +51,37 @@ def _get_lock() -> asyncio.Lock:
     return _page_lock
 
 
-def _find_chrome() -> str:
-    candidates = [
-        os.environ.get("CHROME_PATH", ""),
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        shutil.which("google-chrome") or "",
-        shutil.which("chrome") or "",
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    ]
-    for c in candidates:
-        if c and os.path.isfile(c):
-            return c
-    raise RuntimeError("Chrome not found — set CHROME_PATH env var")
-
-
-async def _launch_chrome() -> subprocess.Popen:
-    chrome = _find_chrome()
-    user_data = os.path.abspath(_USER_DATA_DIR)
-    os.makedirs(user_data, exist_ok=True)
-    args = [
-        chrome,
-        f"--remote-debugging-port={_CDP_PORT}",
-        f"--user-data-dir={user_data}",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-background-networking",
-        "--disable-sync",
-        "--disable-translate",
-        "--disable-extensions",
-        "--window-size=1440,900",
-        *stealth_args(),
-        "about:blank",
-    ]
-    proc = subprocess.Popen(
-        args,
-        **stealth_popen_kwargs(),
-    )
-    await asyncio.sleep(2)
-    return proc
-
-
-async def _get_browser():
-    global _pw_instance, _cdp_browser, _chrome_proc
-    if _cdp_browser and _cdp_browser.is_connected():
-        return _cdp_browser
-    if _chrome_proc is None or _chrome_proc.poll() is not None:
-        _chrome_proc = await _launch_chrome()
-    from playwright.async_api import async_playwright
-    if _pw_instance is None:
-        _pw_instance = await async_playwright().start()
-    for attempt in range(8):
+async def _get_context():
+    """Persistent headed Chrome context -- cookies survive across searches."""
+    global _pw_instance, _pw_context
+    if _pw_context:
         try:
-            _cdp_browser = await _pw_instance.chromium.connect_over_cdp(
-                f"http://127.0.0.1:{_CDP_PORT}"
-            )
-            logger.info("GOL: connected to Chrome via CDP port %d", _CDP_PORT)
-            return _cdp_browser
+            _pw_context.pages
+            return _pw_context
         except Exception:
-            await asyncio.sleep(1)
-    raise RuntimeError(f"Failed to connect to Chrome CDP on port {_CDP_PORT}")
+            _pw_context = None
+
+    from playwright.async_api import async_playwright
+
+    os.makedirs(os.path.abspath(_USER_DATA_DIR), exist_ok=True)
+    _pw_instance = await async_playwright().start()
+
+    _pw_context = await _pw_instance.chromium.launch_persistent_context(
+        os.path.abspath(_USER_DATA_DIR),
+        channel="chrome",
+        headless=False,
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--window-position=-2400,-2400",
+            "--window-size=1366,768",
+        ],
+        viewport={"width": 1366, "height": 768},
+        locale="pt-BR",
+        timezone_id="America/Sao_Paulo",
+        service_workers="block",
+    )
+    logger.info("GOL: persistent Chrome context ready")
+    return _pw_context
 
 
 async def _ensure_persistent_page():
@@ -132,13 +96,7 @@ async def _ensure_persistent_page():
         except Exception:
             pass
 
-    browser = await _get_browser()
-    contexts = browser.contexts
-    if contexts:
-        ctx = contexts[0]
-    else:
-        ctx = await browser.new_context()
-
+    ctx = await _get_context()
     page = await ctx.new_page()
 
     logger.info("GOL: loading Angular SPA...")
@@ -148,20 +106,21 @@ async def _ensure_persistent_page():
     # Dismiss LGPD/cookie overlays
     await _dismiss_cookies(page)
 
-    # Verify Angular booted (session UUID exists)
-    for _ in range(10):
-        uuid = await page.evaluate("""() => {
+    # Wait for Angular to boot and populate session UUID
+    try:
+        uuid = await page.wait_for_function("""() => {
             for (let i = 0; i < sessionStorage.length; i++) {
                 const key = sessionStorage.key(i);
                 const m = key.match(/^([0-9a-f-]+)_@SiteGolB2C/);
                 if (m) return m[1];
             }
             return null;
-        }""")
-        if uuid:
-            logger.info("GOL: Angular SPA ready (UUID=%s...)", uuid[:8])
-            break
-        await asyncio.sleep(1)
+        }""", timeout=15000)
+        uuid_val = await uuid.json_value()
+        if uuid_val:
+            logger.info("GOL: Angular SPA ready (UUID=%s...)", uuid_val[:8])
+    except Exception:
+        logger.warning("GOL: Angular UUID not found after 15s")
 
     _persistent_page = page
     return page

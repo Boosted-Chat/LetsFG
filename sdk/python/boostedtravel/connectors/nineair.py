@@ -2,28 +2,28 @@
 9 Air browser-based scraper — Playwright form fill + response interception.
 
 9 Air (IATA: AQ) is a Chinese LCC headquartered in Guangzhou, Guangdong.
-Hub: CAN (Guangzhou Baiyun). Domestic network: ~30 Chinese cities.
-Website: www.9air.com (Chinese, Next.js SPA).
+Hub: CAN (Guangzhou Baiyun). Domestic Chinese network (~10 routes from CAN).
+Website: www.9air.com (Chinese, Vue 2 + Element-UI SPA).
 
 NOT available in GDS — must be scraped directly.
-Direct API calls fail with anti-spider verification ("检验失败").
-Must use browser-based approach: fill form → click search → intercept.
 
 Strategy (browser-based, validated Mar 2026):
-  1. Launch Playwright headed browser
-  2. Navigate to https://www.9air.com/zh-CN (homepage with search form)
-  3. Fill the search form (departure, arrival, date)
-  4. Click search → page navigates to results
-  5. Intercept /shop/api/shopping/b2c/searchflight response
-  6. Parse flight results → FlightOffers
+  1. Launch Playwright browser, navigate to homepage
+  2. Set up route interception for /searchflight — replace TongDun
+     black_box with _fmOpt.sign() in Anti-Headers (bypasses anti-bot)
+  3. Fill search form atomically via Vue 2 reactive model ($set)
+  4. Trigger SPA navigation via parent.toSearch() → /zh-CN/book/booking
+  5. Intercept modified searchflight response → parse flights
 
-Search API endpoint (captured via interception):
-  POST /shop/api/shopping/b2c/searchflight?language=zh_CN&currency=CNY
+Search API endpoint (GET, with Anti-Headers):
+  GET /shop/api/shopping/b2c/searchflight?language=zh_CN&currency=CNY&...
 
-City dictionary (static, works directly):
-  GET /frontendfile/cityDict.js
-
-Discovered via Playwright probes, Mar 2026.
+Anti-bot solution:
+  The server requires an "Anti-Headers" HTTP header with JSON payload.
+  The standard flow uses a TongDun fingerprint (black_box via _fmOpt)
+  plus a NetEase YiDun token (dunVm). YiDun fails in Playwright.
+  Solution: strip black_box, use _fmOpt.sign({path, body}) instead.
+  The server accepts sign-only anti-headers. Discovered via probes 29-34.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -73,6 +73,7 @@ _IATA_CN: dict[str, str] = {
     "HRB": "哈尔滨", "KWE": "贵阳", "FOC": "福州", "XMN": "厦门",
     "NNG": "南宁", "HFE": "合肥", "TSN": "天津", "SHE": "沈阳",
     "SJW": "石家庄", "TYN": "太原", "LPF": "六盘水", "HSN": "舟山",
+    "JHG": "西双版纳", "WUT": "忻州", "XNN": "西宁",
     "BKK": "曼谷", "HAN": "河内", "KUL": "吉隆坡", "KIX": "大阪",
     "VTE": "万象",
 }
@@ -83,22 +84,11 @@ async def _get_browser():
     global _browser, _pw_instance
     if _browser and _browser.is_connected():
         return _browser
-
-    from playwright.async_api import async_playwright
-    from boostedtravel.connectors.browser import stealth_args
-    _pw_instance = await async_playwright().start()
-    _args = [*stealth_args(), "--lang=zh-CN", "--disable-blink-features=AutomationControlled"]
-    try:
-        _browser = await _pw_instance.chromium.launch(
-            headless=True,
-            channel="chrome",
-            args=_args,
-        )
-    except Exception:
-        _browser = await _pw_instance.chromium.launch(
-            headless=True,
-            args=_args,
-        )
+    from connectors.browser import launch_headed_browser
+    _browser = await launch_headed_browser(extra_args=[
+        "--lang=zh-CN",
+        "--disable-blink-features=AutomationControlled",
+    ])
     logger.info("9 Air: browser launched")
     return _browser
 
@@ -126,6 +116,10 @@ class NineAirConnectorClient:
                 locale="zh-CN",
                 viewport=random.choice(_VIEWPORTS),
             )
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => false});
+                window.chrome = { runtime: { connect: function(){}, sendMessage: function(){} } };
+            """)
 
             try:
                 page = await context.new_page()
@@ -160,35 +154,76 @@ class NineAirConnectorClient:
     async def _search_with_interception(
         self, page, req: FlightSearchRequest, t0: float,
     ) -> list[FlightOffer]:
-        """Navigate to search page, fill form, intercept API response."""
+        """Navigate, fill form via Vue model, intercept search API response.
+
+        The anti-bot bypass works by intercepting outgoing searchflight requests
+        and replacing the TongDun ``black_box`` in Anti-Headers with a
+        ``_fmOpt.sign()`` signature. The server accepts sign-only payloads.
+        """
 
         remaining = lambda: max(self.timeout - (time.monotonic() - t0), 1)
 
         captured_data: dict = {}
         api_event = asyncio.Event()
 
-        async def on_response(response):
-            try:
-                url = response.url.lower()
-                if response.status == 200 and any(k in url for k in (
-                    "searchflight", "calendarshopping", "availability",
-                    "flightsearch", "search/flights", "shopping/b2c",
-                )):
-                    ct = response.headers.get("content-type", "")
-                    if "json" in ct or "javascript" in ct:
-                        data = await response.json()
-                        if data and isinstance(data, dict):
-                            # Look for successful flight data
-                            if data.get("status") not in ("500",) and "data" in data:
-                                captured_data["json"] = data
-                                api_event.set()
-            except Exception:
-                pass
+        # ── Route interception: modify Anti-Headers on outgoing requests ───
+        async def _modify_anti_headers(route):
+            """Strip black_box, inject _fmOpt.sign() into Anti-Headers."""
+            request = route.request
+            url = request.url
+            headers = dict(request.headers)
+            anti = headers.get("anti-headers", "")
 
-        page.on("response", on_response)
+            if anti:
+                try:
+                    parsed = json.loads(anti)
+                    parsed.pop("black_box", None)
+
+                    rel_url = url.replace(_BASE_URL, "")
+                    sign_result = await page.evaluate(
+                        r"""(urlPath) => {
+                            try {
+                                if (typeof _fmOpt === 'undefined' || !_fmOpt.sign) return {error: 'no _fmOpt'};
+                                const parts = urlPath.split('?');
+                                const r = _fmOpt.sign({path: parts[0], body: parts[1] || ''});
+                                return {code: r.code, sign: r.sign};
+                            } catch(e) { return {error: e.message}; }
+                        }""",
+                        rel_url,
+                    )
+
+                    if sign_result.get("code") == 0:
+                        parts = rel_url.split("?")
+                        parsed["path"] = parts[0]
+                        parsed["body"] = parts[1] if len(parts) > 1 else ""
+                        parsed["sign"] = sign_result["sign"]
+
+                    headers["anti-headers"] = json.dumps(parsed)
+                except Exception:
+                    pass
+
+            resp = await route.fetch(headers=headers)
+            body_text = await resp.text()
+
+            if "searchflight" in url.lower() and resp.status == 200:
+                try:
+                    data = json.loads(body_text)
+                    if data.get("status") == 200 and data.get("data"):
+                        captured_data["json"] = data
+                        api_event.set()
+                except Exception:
+                    pass
+
+            try:
+                await route.fulfill(response=resp)
+            except Exception:
+                pass  # Context may already be closed
+
+        await page.route("**/searchflight**", _modify_anti_headers)
+        await page.route("**/calendarshopping**", _modify_anti_headers)
 
         # Step 1: Load homepage
-        logger.info("9 Air: loading homepage for %s→%s", req.origin, req.destination)
+        logger.info("9 Air: loading homepage for %s->%s", req.origin, req.destination)
         try:
             await page.goto(
                 _SEARCH_PAGE,
@@ -199,190 +234,67 @@ class NineAirConnectorClient:
             logger.warning("9 Air: failed to load page: %s", exc)
             return []
 
-        await asyncio.sleep(3.0)
+        await asyncio.sleep(4.0)
 
-        # Dismiss cookie/privacy banners
-        await self._dismiss_popups(page)
+        # Clear black_box to force sign-only flow
+        await page.evaluate("() => { sessionStorage.removeItem('currentBlackBox'); }")
 
-        # Step 2: Select one-way
-        try:
-            await page.click("text=单程", timeout=3000)
-            await asyncio.sleep(0.5)
-        except Exception:
-            pass
+        # Step 2: Atomic form fill via Vue model + SPA navigation
+        dep_cn = _IATA_CN.get(req.origin, req.origin)
+        arr_cn = _IATA_CN.get(req.destination, req.destination)
+        date_str = req.date_from.strftime("%Y-%m-%d")
 
-        # Step 3: Fill departure city
-        ok = await self._fill_city(page, "departure", req.origin)
-        if not ok:
-            logger.warning("9 Air: could not fill departure city %s", req.origin)
+        nav_ok = await page.evaluate(
+            r"""([depCode, depName, arrCode, arrName, dateStr]) => {
+                const depCity = { name: depName, code: depCode, type: "CITY" };
+                const arrCity = { name: arrName, code: arrCode, type: "CITY" };
+                /* Close any open popovers */
+                document.querySelectorAll('.el-popover, .el-popper').forEach(el => {
+                    el.style.display = 'none';
+                    if (el.__vue__) try { el.__vue__.doClose(); } catch(e) {}
+                });
+                const formEl = document.querySelector('.flight-way');
+                if (!formEl || !formEl.__vue__) return false;
+                const fvm = formEl.__vue__;
+                fvm.tripType = 'OW';
+                fvm.$set(fvm.form, 's_address', depCity);
+                fvm.$set(fvm.form, 'e_address', arrCity);
+                fvm.$set(fvm.form, 's_date', dateStr);
+                fvm.$set(fvm.form, 'e_date', '');
+                document.querySelectorAll('.fly-input').forEach(el => {
+                    if (!el.__vue__) return;
+                    const vm = el.__vue__;
+                    if ((vm.$props || {}).icon === 'dept') {
+                        vm.showCityValue = depName; vm.defaultCity = depCity;
+                    }
+                    if ((vm.$props || {}).icon === 'dest') {
+                        vm.showCityValue = arrName; vm.defaultCity = arrCity;
+                    }
+                });
+                const searchData = { tripType: 'OW', form: fvm.form };
+                fvm.$mstore.save(searchData, 'searchForm');
+                fvm.$parent.toSearch(searchData);
+                return true;
+            }""",
+            [req.origin, dep_cn, req.destination, arr_cn, date_str],
+        )
+
+        if not nav_ok:
+            logger.warning("9 Air: Vue form fill / navigation failed")
             return []
 
-        # Step 4: Fill arrival city
-        ok = await self._fill_city(page, "arrival", req.destination)
-        if not ok:
-            logger.warning("9 Air: could not fill arrival city %s", req.destination)
-            return []
-
-        # Step 5: Select date
-        await self._select_date(page, req.date_from)
-
-        # Step 6: Click search
-        await self._click_search(page)
-
-        # Step 7: Wait for API response
+        # Step 3: Wait for intercepted API response
         try:
             await asyncio.wait_for(api_event.wait(), timeout=remaining())
         except asyncio.TimeoutError:
             logger.warning("9 Air: timed out waiting for search results")
-            # Try DOM extraction as fallback
-            return await self._extract_from_dom(page, req)
+            return []
 
         data = captured_data.get("json", {})
         if not data:
             return []
 
         return self._parse_response(data, req)
-
-    async def _fill_city(self, page, field_type: str, code: str) -> bool:
-        """Fill a departure or arrival city field.
-
-        Departure: type IATA in .cityInput → click .panel-search-body suggestion.
-        Arrival:   Escape city grid → type Chinese name → click suggestion.
-        """
-        idx = 0 if field_type == "departure" else 1
-        cn_name = _IATA_CN.get(code)
-
-        # Strategy 1: type in .cityInput → use search suggestions
-        try:
-            city_inputs = page.locator(".cityInput:visible")
-            if await city_inputs.count() > idx:
-                inp = city_inputs.nth(idx)
-                await inp.click(timeout=5000)
-                await asyncio.sleep(0.5)
-                # Close popup if arrival grid is covering things
-                if field_type == "arrival":
-                    await page.keyboard.press("Escape")
-                    await asyncio.sleep(0.3)
-                    await inp.click(timeout=3000)
-                    await asyncio.sleep(0.3)
-                # Try Chinese name first for arrival (IATA doesn't show suggestions)
-                terms = [cn_name, code] if (field_type == "arrival" and cn_name) else [code, cn_name] if cn_name else [code]
-                for term in terms:
-                    if not term:
-                        continue
-                    await inp.fill(term)
-                    await asyncio.sleep(2.0)
-                    if await self._click_city_suggestion(page):
-                        return True
-                await page.keyboard.press("Enter")
-                await asyncio.sleep(0.5)
-                return True
-        except Exception:
-            pass
-
-        return False
-
-    async def _click_city_suggestion(self, page) -> bool:
-        """Click the first visible city suggestion in a dropdown."""
-        for sel in (".panel-search-body:visible li",
-                    ".city-item", "[class*=city-option]",
-                    "[class*=city-content-list]:visible li",
-                    "[class*=dropdown] li", "[class*=suggest] li",
-                    ".ant-select-dropdown-menu-item",
-                    "[class*=option]", "[class*=list] li",
-                    "[role=option]", "[role=listbox] li"):
-            try:
-                item = page.locator(sel).first
-                if await item.count() > 0 and await item.is_visible():
-                    await item.click(timeout=2000)
-                    await asyncio.sleep(0.5)
-                    return True
-            except Exception:
-                continue
-        return False
-
-    async def _select_date(self, page, target_date) -> None:
-        """Select the departure date using 9 Air's custom calendar.
-
-        The calendar uses input.dateInput and a .date-panel with two months.
-        Clicking the date input opens the panel. Day cells are clickable divs.
-        """
-        try:
-            # Click the date input to open the calendar panel
-            date_inp = page.locator("input.dateInput, .cell.deptdate, .fly-date-date").first
-            if await date_inp.count() > 0:
-                await date_inp.click(timeout=3000)
-                await asyncio.sleep(0.8)
-
-            day = target_date.day
-            target_month_label = f"{target_date.year}年{target_date.month}月"
-
-            # The calendar shows two months in .date-main panels with .date-head headers.
-            # Find the panel whose header matches our target month.
-            clicked = await page.evaluate("""(args) => {
-                const [day, monthLabel] = args;
-                const panels = document.querySelectorAll('.date-main');
-                for (const panel of panels) {
-                    const head = panel.querySelector('.date-head');
-                    if (head && head.textContent.trim().includes(monthLabel)) {
-                        // Find the day cell that matches (not disabled, not from other month)
-                        const cells = panel.querySelectorAll('.date-cell:not(.disabled):not(.other-month)');
-                        for (const cell of cells) {
-                            const txt = cell.textContent.trim().split('\\n')[0].trim();
-                            if (txt === String(day)) {
-                                cell.click();
-                                return true;
-                            }
-                        }
-                        // Fallback: try all child elements with the day number
-                        const all = panel.querySelectorAll('div, td, span');
-                        for (const el of all) {
-                            if (el.children.length === 0 && el.textContent.trim() === String(day)) {
-                                el.click();
-                                return true;
-                            }
-                        }
-                    }
-                }
-                return false;
-            }""", [day, target_month_label])
-
-            if clicked:
-                await asyncio.sleep(0.5)
-                logger.debug("9 Air: selected date %s", target_date)
-            else:
-                # Fallback: just set the date value directly
-                await page.evaluate(
-                    """(dateStr) => {
-                        const inp = document.querySelector('input.dateInput');
-                        if (inp) {
-                            const nativeSet = Object.getOwnPropertyDescriptor(
-                                HTMLInputElement.prototype, 'value').set;
-                            nativeSet.call(inp, dateStr);
-                            inp.dispatchEvent(new Event('input', {bubbles: true}));
-                            inp.dispatchEvent(new Event('change', {bubbles: true}));
-                        }
-                    }""",
-                    target_date.strftime("%Y-%m-%d"),
-                )
-                await asyncio.sleep(0.3)
-                logger.debug("9 Air: set date via JS fallback %s", target_date)
-        except Exception as exc:
-            logger.debug("9 Air: date selection failed: %s", exc)
-
-    async def _click_search(self, page) -> None:
-        """Click the search button."""
-        for sel in ("button:has-text('查询')", "button.flyway-btn",
-                    "button:has-text('搜索')", "button:has-text('Search')",
-                    "button[type='submit']", "[class*=search-btn]"):
-            try:
-                btn = page.locator(sel).first
-                if await btn.count() > 0:
-                    await btn.click(timeout=3000)
-                    await asyncio.sleep(1.0)
-                    return
-            except Exception:
-                continue
 
     async def _dismiss_popups(self, page) -> None:
         """Dismiss cookie banners and popups."""
@@ -396,175 +308,110 @@ class NineAirConnectorClient:
             except Exception:
                 continue
 
-    async def _extract_from_dom(self, page, req: FlightSearchRequest) -> list[FlightOffer]:
-        """Fallback: extract flight info from DOM if API interception failed."""
-        try:
-            cards = await page.evaluate("""() => {
-                const results = [];
-                const cards = document.querySelectorAll(
-                    '[class*=flight-card], [class*=flight-item], [class*=result-item], ' +
-                    '[class*=flight-row], [class*=itinerary]'
-                );
-                for (const card of [...cards].slice(0, 20)) {
-                    const text = card.textContent || '';
-                    const priceMatch = text.match(/[¥￥](\\d+)/);
-                    const timeMatch = text.match(/(\\d{2}:\\d{2})/g);
-                    const flightMatch = text.match(/([A-Z0-9]{2}\\d{3,4})/);
-                    if (priceMatch) {
-                        results.push({
-                            price: parseInt(priceMatch[1]),
-                            times: timeMatch || [],
-                            flight_no: flightMatch ? flightMatch[0] : '',
-                            text: text.slice(0, 200),
-                        });
-                    }
-                }
-                return results;
-            }""")
-
-            if not cards:
-                return []
-
-            offers = []
-            for card in cards:
-                price = card.get("price", 0)
-                if not price or price <= 0:
-                    continue
-
-                flight_no = card.get("flight_no", "AQ")
-                times = card.get("times", [])
-
-                dep_dt = datetime(
-                    req.date_from.year, req.date_from.month, req.date_from.day,
-                    int(times[0].split(":")[0]) if times else 0,
-                    int(times[0].split(":")[1]) if times else 0,
-                ) if times else datetime(req.date_from.year, req.date_from.month, req.date_from.day)
-
-                arr_dt = datetime(
-                    req.date_from.year, req.date_from.month, req.date_from.day,
-                    int(times[1].split(":")[0]) if len(times) > 1 else 0,
-                    int(times[1].split(":")[1]) if len(times) > 1 else 0,
-                ) if len(times) > 1 else dep_dt
-
-                dur = max(int((arr_dt - dep_dt).total_seconds()), 0) if arr_dt > dep_dt else 0
-
-                fid = hashlib.md5(
-                    f"aq_{req.origin}{req.destination}{flight_no}{price}".encode()
-                ).hexdigest()[:12]
-
-                segment = FlightSegment(
-                    airline="AQ",
-                    airline_name="9 Air",
-                    flight_no=flight_no,
-                    origin=req.origin,
-                    destination=req.destination,
-                    departure=dep_dt,
-                    arrival=arr_dt,
-                    duration_seconds=dur,
-                    cabin_class="economy",
-                )
-
-                offers.append(FlightOffer(
-                    id=f"aq_{fid}",
-                    price=float(price),
-                    currency="CNY",
-                    price_formatted=f"{price} CNY",
-                    outbound=FlightRoute(
-                        segments=[segment],
-                        total_duration_seconds=dur,
-                        stopovers=0,
-                    ),
-                    inbound=None,
-                    airlines=["9 Air"],
-                    owner_airline="AQ",
-                    booking_url=self._booking_url(req),
-                    is_locked=False,
-                    source="9air_direct",
-                    source_tier="free",
-                ))
-
-            return offers
-        except Exception as exc:
-            logger.debug("9 Air: DOM extraction failed: %s", exc)
-            return []
-
     def _parse_response(self, data: dict, req: FlightSearchRequest) -> list[FlightOffer]:
-        """Parse the searchflight API response."""
+        """Parse the searchflight API response.
+
+        Response structure::
+
+            data.flights[0][] — array of flight objects, each with:
+              .segments[] — leg details (departDate, departTime, arrivalTime, etc.)
+              .fares[]    — cabin/price options (price, ticketPrice, taxPrice, cabinClass)
+        """
         offers: list[FlightOffer] = []
         booking_url = self._booking_url(req)
 
-        # 9 Air API response format varies — try common patterns
-        flights = data.get("data", [])
-        if isinstance(flights, dict):
-            flights = flights.get("flightList", []) or flights.get("flights", []) or flights.get("results", [])
-
-        if not isinstance(flights, list):
+        outer = data.get("data", {})
+        if not isinstance(outer, dict):
             return []
 
-        for flight in flights:
+        flights_wrapper = outer.get("flights", [])
+        if not flights_wrapper or not isinstance(flights_wrapper, list):
+            return []
+
+        # flights is [[flight1, flight2, ...]] — first element is array of flights
+        flight_list = flights_wrapper[0] if flights_wrapper else []
+        if not isinstance(flight_list, list):
+            return []
+
+        for flight in flight_list:
             if not isinstance(flight, dict):
                 continue
-
-            price = (
-                flight.get("price") or flight.get("minPrice") or
-                flight.get("lowestPrice") or flight.get("salePrice") or 0
-            )
-            try:
-                price = float(price)
-            except (ValueError, TypeError):
+            if flight.get("salesClosed"):
                 continue
+
+            segments_raw = flight.get("segments", [])
+            fares = flight.get("fares", [])
+            if not segments_raw or not fares:
+                continue
+
+            # Find cheapest ADT fare
+            adt_fares = [f for f in fares if f.get("paxType") == "ADT"]
+            if not adt_fares:
+                adt_fares = fares
+            cheapest = min(adt_fares, key=lambda f: float(f.get("price", 99999)))
+            price = float(cheapest.get("price", 0))
             if price <= 0:
                 continue
 
-            flight_no = (
-                flight.get("flightNo") or flight.get("flightNumber") or
-                flight.get("no") or "AQ"
-            )
-            dep_time = (
-                flight.get("depTime") or flight.get("departureTime") or
-                flight.get("deptTime") or ""
-            )
-            arr_time = (
-                flight.get("arrTime") or flight.get("arrivalTime") or
-                flight.get("destTime") or ""
-            )
-            dep_airport = flight.get("depAirportCode") or flight.get("depCode") or req.origin
-            arr_airport = flight.get("arrAirportCode") or flight.get("arrCode") or req.destination
+            currency = cheapest.get("currency", "CNY")
 
-            dep_dt = self._parse_time(dep_time, req.date_from)
-            arr_dt = self._parse_time(arr_time, req.date_from)
-            dur = max(int((arr_dt - dep_dt).total_seconds()), 0) if arr_dt > dep_dt else 0
+            # Build segments
+            parsed_segments: list[FlightSegment] = []
+            total_duration = 0
+
+            for seg in segments_raw:
+                dep_date = seg.get("departDate", "")
+                dep_time = seg.get("departTime", "")
+                arr_date = seg.get("arrivalDate", "")
+                arr_time = seg.get("arrivalTime", "")
+
+                dep_dt = self._parse_datetime(dep_date, dep_time, req.date_from)
+                arr_dt = self._parse_datetime(arr_date, arr_time, req.date_from)
+
+                dur = seg.get("flightTime", 0) or 0
+                if dur == 0 and arr_dt > dep_dt:
+                    dur = int((arr_dt - dep_dt).total_seconds())
+                total_duration += dur
+
+                flight_no = seg.get("marketFlightNo", "") or seg.get("carrierFlightNo", "")
+                airline_code = seg.get("marketAirlineCode", "AQ")
+                airline_name = seg.get("marketAirlineName", "9 Air")
+
+                parsed_segments.append(FlightSegment(
+                    airline=airline_code,
+                    airline_name=airline_name or "9 Air",
+                    flight_no=f"{airline_code}{flight_no}" if flight_no and not flight_no.startswith(airline_code) else (flight_no or "AQ"),
+                    origin=seg.get("departAirportCode", req.origin),
+                    destination=seg.get("arrivalAirportCode", req.destination),
+                    departure=dep_dt,
+                    arrival=arr_dt,
+                    duration_seconds=dur,
+                    cabin_class=cheapest.get("cabinClass", "Y"),
+                ))
+
+            if not parsed_segments:
+                continue
+
+            stopovers = sum(s.get("stopoverCount", 0) for s in segments_raw)
 
             fid = hashlib.md5(
-                f"aq_{req.origin}{req.destination}{flight_no}{price}".encode()
+                f"aq_{req.origin}{req.destination}{flight.get('flightId', '')}{price}".encode()
             ).hexdigest()[:12]
 
-            segment = FlightSegment(
-                airline="AQ",
-                airline_name="9 Air",
-                flight_no=flight_no,
-                origin=dep_airport,
-                destination=arr_airport,
-                departure=dep_dt,
-                arrival=arr_dt,
-                duration_seconds=dur,
-                cabin_class="economy",
-            )
-
             route = FlightRoute(
-                segments=[segment],
-                total_duration_seconds=dur,
-                stopovers=0,
+                segments=parsed_segments,
+                total_duration_seconds=total_duration,
+                stopovers=stopovers,
             )
 
             offers.append(FlightOffer(
                 id=f"aq_{fid}",
                 price=round(price, 2),
-                currency="CNY",
-                price_formatted=f"{price:.0f} CNY",
+                currency=currency,
+                price_formatted=f"{price:.0f} {currency}",
                 outbound=route,
                 inbound=None,
-                airlines=["9 Air"],
+                airlines=list({s.airline_name for s in parsed_segments}),
                 owner_airline="AQ",
                 booking_url=booking_url,
                 is_locked=False,
@@ -572,29 +419,67 @@ class NineAirConnectorClient:
                 source_tier="free",
             ))
 
+            # Also add higher fare classes as separate offers
+            for fare in adt_fares:
+                fp = float(fare.get("price", 0))
+                if fp <= 0 or fp == price:
+                    continue
+
+                fare_fid = hashlib.md5(
+                    f"aq_{req.origin}{req.destination}{flight.get('flightId', '')}{fp}".encode()
+                ).hexdigest()[:12]
+
+                fare_segments = []
+                for ps in parsed_segments:
+                    fare_segments.append(FlightSegment(
+                        airline=ps.airline,
+                        airline_name=ps.airline_name,
+                        flight_no=ps.flight_no,
+                        origin=ps.origin,
+                        destination=ps.destination,
+                        departure=ps.departure,
+                        arrival=ps.arrival,
+                        duration_seconds=ps.duration_seconds,
+                        cabin_class=fare.get("cabinClass", ps.cabin_class),
+                    ))
+
+                offers.append(FlightOffer(
+                    id=f"aq_{fare_fid}",
+                    price=round(fp, 2),
+                    currency=currency,
+                    price_formatted=f"{fp:.0f} {currency}",
+                    outbound=FlightRoute(
+                        segments=fare_segments,
+                        total_duration_seconds=total_duration,
+                        stopovers=stopovers,
+                    ),
+                    inbound=None,
+                    airlines=list({s.airline_name for s in fare_segments}),
+                    owner_airline="AQ",
+                    booking_url=booking_url,
+                    is_locked=False,
+                    source="9air_direct",
+                    source_tier="free",
+                ))
+
         return offers
 
     @staticmethod
-    def _parse_time(raw: str, fallback_date) -> datetime:
-        """Parse time string into datetime."""
-        if not raw:
-            return datetime(fallback_date.year, fallback_date.month, fallback_date.day)
+    def _parse_datetime(date_str: str, time_str: str, fallback_date) -> datetime:
+        """Parse separate date and time strings into a datetime."""
+        try:
+            if date_str and time_str:
+                return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            pass
 
-        # Try full datetime formats
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M",
-                    "%Y-%m-%dT%H:%M"):
-            try:
-                return datetime.strptime(raw[:len(fmt) + 2], fmt)
-            except (ValueError, IndexError):
-                continue
-
-        # Try time-only format "HH:MM" — combine with search date
-        m = re.match(r"(\d{2}):(\d{2})", raw)
-        if m:
-            return datetime(
-                fallback_date.year, fallback_date.month, fallback_date.day,
-                int(m.group(1)), int(m.group(2)),
-            )
+        if time_str:
+            m = re.match(r"(\d{2}):(\d{2})", time_str)
+            if m:
+                return datetime(
+                    fallback_date.year, fallback_date.month, fallback_date.day,
+                    int(m.group(1)), int(m.group(2)),
+                )
 
         return datetime(fallback_date.year, fallback_date.month, fallback_date.day)
 
@@ -602,9 +487,10 @@ class NineAirConnectorClient:
     def _booking_url(req: FlightSearchRequest) -> str:
         dep = req.date_from.strftime("%Y-%m-%d")
         return (
-            f"https://www.9air.com/zh-CN/booking/search"
-            f"?depCity={req.origin}&arrCity={req.destination}&goDate={dep}"
-            f"&adtCount=1&chdCount=0&infCount=0"
+            f"https://www.9air.com/zh-CN/book/booking"
+            f"?tripType=OW&flightCondition=index%3A0%3BdepCity%3A{req.origin}"
+            f"%3BarrCity%3A{req.destination}%3Bdate%3A{dep}"
+            f"&ADT=1&CHD=0&INF=0"
         )
 
     @staticmethod

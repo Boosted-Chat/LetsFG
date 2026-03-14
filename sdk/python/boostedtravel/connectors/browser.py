@@ -22,6 +22,32 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# ── Concurrency gate — limits how many browsers can run at once ──────────────
+# Without this, 20+ Chrome processes spawn simultaneously and crash the machine.
+_MAX_CONCURRENT_BROWSERS = 8
+_browser_semaphore: Optional[asyncio.Semaphore] = None
+
+
+async def _get_browser_semaphore() -> asyncio.Semaphore:
+    """Get or create the global browser concurrency semaphore (lazy init)."""
+    global _browser_semaphore
+    if _browser_semaphore is None:
+        _browser_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_BROWSERS)
+    return _browser_semaphore
+
+
+async def acquire_browser_slot():
+    """Acquire a browser slot — blocks if too many browsers are running."""
+    sem = await _get_browser_semaphore()
+    await sem.acquire()
+
+
+def release_browser_slot():
+    """Release a browser slot after a connector finishes with its browser."""
+    if _browser_semaphore is not None:
+        _browser_semaphore.release()
+
+
 # ── Cleanup registry — tracks resources launched by connectors ───────────────
 _launched_procs: list[subprocess.Popen] = []
 _launched_pw_instances: list = []
@@ -194,6 +220,7 @@ async def connect_cdp(port: int):
     """
     from playwright.async_api import async_playwright
     pw = await async_playwright().start()
+    _launched_pw_instances.append(pw)
     browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
     return browser
 
@@ -209,18 +236,26 @@ async def get_or_launch_cdp(
     """
     Try connecting to existing Chrome on port, or launch a new one.
 
-    Returns (browser, proc_or_None).
+    Returns (browser, proc_or_None).  Playwright instances are tracked
+    in ``_launched_pw_instances`` so ``cleanup_all_browsers()`` can stop
+    them later.
     """
     from playwright.async_api import async_playwright
 
     # Try connecting to already-running Chrome
+    pw = None
     try:
         pw = await async_playwright().start()
         browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+        _launched_pw_instances.append(pw)
         logger.info("Connected to existing Chrome on port %d", port)
         return browser, None
     except Exception:
-        pass
+        if pw:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
 
     # Launch new Chrome
     proc = await launch_cdp_chrome(
@@ -230,6 +265,7 @@ async def get_or_launch_cdp(
         startup_wait=startup_wait,
     )
     pw = await async_playwright().start()
+    _launched_pw_instances.append(pw)
     browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
     return browser, proc
 
@@ -386,6 +422,10 @@ async def cleanup_all_browsers():
             except Exception:
                 pass
     _launched_procs.clear()
+
+    # Reset the semaphore so it's fresh for next search
+    global _browser_semaphore
+    _browser_semaphore = None
 
     if closed:
         logger.info("browser.py cleanup: terminated %d browser resources", closed)

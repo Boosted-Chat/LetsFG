@@ -34,7 +34,7 @@ from typing import Any, Optional
 
 from curl_cffi import requests as cffi_requests
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -61,7 +61,7 @@ _TIMEZONES = [
     "Europe/Paris", "Europe/Madrid",
 ]
 
-# ── Persistent headed browser context ─────────────────────────────────────────
+# ── Persistent headed browser context ─────────────────────────────────────
 import os as _os
 _USER_DATA_DIR = _os.path.join(_os.environ.get("TEMP", "/tmp"), "jet2_pw_data")
 _pw_instance = None
@@ -463,7 +463,7 @@ class Jet2ConnectorClient:
         last_error = None
         for attempt in range(2):
             if attempt > 0:
-                logger.info("Jet2: retry %d with fresh browser", attempt)
+                logger.info("Jet2: retry %d with fresh context", attempt)
                 await _reset_context()
                 await asyncio.sleep(3.0)
             try:
@@ -621,11 +621,10 @@ class Jet2ConnectorClient:
             logger.error("Jet2 Playwright error: %s", e)
             return self._empty(req)
         finally:
-            if page:
-                try:
-                    await page.close()
-                except Exception:
-                    pass
+            try:
+                await page.close()
+            except Exception:
+                pass
 
     # ── Direct API fetch ─────────────────────────────────────────────
 

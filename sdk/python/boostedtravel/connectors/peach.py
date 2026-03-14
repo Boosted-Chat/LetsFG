@@ -30,26 +30,20 @@ import urllib.parse
 from datetime import datetime, timedelta
 from typing import Optional
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from boostedtravel.connectors.browser import stealth_args, stealth_popen_kwargs
+from connectors.browser import find_chrome, stealth_popen_kwargs
 
 logger = logging.getLogger(__name__)
 
+# ── CDP Chrome (headed — headless causes page-load timeout on Peach) ─────
 _CDP_PORT = 9468
 _USER_DATA_DIR = os.path.join(os.environ.get("TEMP", "/tmp"), "peach_cdp_data")
-_CHROME_PATHS = [
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    "/usr/bin/google-chrome",
-    "/usr/bin/google-chrome-stable",
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-]
 
 _chrome_proc: subprocess.Popen | None = None
 _pw_instance = None
@@ -64,30 +58,32 @@ def _get_lock() -> asyncio.Lock:
     return _browser_lock
 
 
-def _find_chrome() -> str:
-    for p in _CHROME_PATHS:
-        if os.path.isfile(p):
-            return p
-    raise FileNotFoundError("Chrome not found")
-
-
 def _launch_chrome():
+    """Launch headed Chrome with CDP.
+
+    MUST be headed (no --headless=new): headless Chrome times out loading
+    Peach pages.  --disable-http2 prevents ERR_HTTP2_PROTOCOL_ERROR.
+    The window is pushed off-screen so it doesn't disturb the user.
+    """
     global _chrome_proc
     if _chrome_proc and _chrome_proc.poll() is None:
         return
     os.makedirs(_USER_DATA_DIR, exist_ok=True)
-    chrome = _find_chrome()
+    chrome = find_chrome()
     _chrome_proc = subprocess.Popen(
         [
             chrome,
             f"--remote-debugging-port={_CDP_PORT}",
             f"--user-data-dir={_USER_DATA_DIR}",
-            "--disable-blink-features=AutomationControlled",
             "--no-first-run", "--no-default-browser-check",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-http2",
             "--disable-background-timer-throttling",
             "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding",
-            *stealth_args(),
+            "--window-position=-2400,-2400",
+            "--window-size=1366,768",
+            "about:blank",
         ],
         **stealth_popen_kwargs(),
     )
@@ -95,6 +91,7 @@ def _launch_chrome():
 
 
 async def _get_browser():
+    """Connect to (or launch) Chrome via CDP. Reused across searches."""
     global _pw_instance, _cdp_browser
     lock = _get_lock()
     async with lock:
@@ -149,10 +146,16 @@ class PeachConnectorClient:
                             wait_until="domcontentloaded", timeout=15000)
             await asyncio.sleep(1.5)
 
-            # Step 3: Click "Search by One-way" to submit — bypasses reCAPTCHA entirely
+            # Clear any error modals that might block the click
+            await page.evaluate("""() => {
+                document.querySelectorAll('.js_modal_backdrop, .modal_error-c, [class*="modal"]')
+                    .forEach(el => { if (el.offsetHeight > 0) el.remove(); });
+            }""")
+
+            # Step 3: Click "Search by One-way" — reCAPTCHA auto-passes with CDP Chrome
             try:
                 one_way_link = page.get_by_role("link", name=re.compile(r"Search by One-way", re.IGNORECASE))
-                await one_way_link.click(timeout=10000)
+                await one_way_link.first.click(timeout=10000)
                 logger.info("Peach: clicked 'Search by One-way'")
             except Exception as e:
                 logger.warning("Peach: could not click one-way search (%s)", e)
@@ -160,14 +163,23 @@ class PeachConnectorClient:
 
             # Wait for flight results page
             try:
-                await page.wait_for_url("**/flight_search**", timeout=20000)
-                logger.info("Peach: reached flight_search page")
+                await page.wait_for_url("**/flight_search**", timeout=25000)
             except Exception:
                 if "flight_search" not in page.url:
-                    logger.warning("Peach: did not reach flight_search (at %s)", page.url)
+                    # Check if reCAPTCHA showed a visible challenge
+                    challenge = await page.evaluate("""() => {
+                        const f = document.querySelector('iframe[title*="recaptcha"]');
+                        return f ? f.offsetHeight > 100 : false;
+                    }""")
+                    if challenge:
+                        logger.warning("Peach: reCAPTCHA image challenge appeared — cannot auto-solve")
+                    else:
+                        logger.warning("Peach: did not reach flight_search (at %s)", page.url)
                     return self._empty(req)
 
-            await asyncio.sleep(2.0)
+            # Let the page settle (avoids "execution context destroyed" from JS redirects)
+            await page.wait_for_load_state("domcontentloaded")
+            await asyncio.sleep(3)
 
             flights_data = await self._extract_flights_from_dom(page)
 

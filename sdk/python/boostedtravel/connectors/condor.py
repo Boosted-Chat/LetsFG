@@ -43,14 +43,14 @@ from typing import Any, Optional
 
 from curl_cffi import requests as cffi_requests
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from boostedtravel.connectors.browser import stealth_args
+from connectors.browser import stealth_args
 
 logger = logging.getLogger(__name__)
 
@@ -93,21 +93,9 @@ async def _get_browser():
     global _pw_instance, _browser
     if _browser and _browser.is_connected():
         return _browser
-    from playwright.async_api import async_playwright
-
-    _pw_instance = await async_playwright().start()
-    try:
-        _browser = await _pw_instance.chromium.launch(
-            headless=True,
-            channel="chrome",
-            args=["--disable-blink-features=AutomationControlled", *stealth_args()],
-        )
-    except Exception:
-        _browser = await _pw_instance.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", *stealth_args()],
-        )
-    logger.info("Condor: Playwright browser launched for cookie farming")
+    from connectors.browser import launch_headed_browser
+    _browser = await launch_headed_browser()
+    logger.info("Condor: browser launched for cookie farming")
     return _browser
 
 
@@ -131,24 +119,27 @@ class CondorConnectorClient:
         t0 = time.monotonic()
 
         try:
-            cookies = await self._ensure_cookies(req)
-            if not cookies:
-                logger.warning("Condor: cookie farm failed, falling back to Playwright")
-                return await self._playwright_fallback(req, t0)
-
-            data = await self._api_search(req, cookies)
-
-            # If search failed (expired cookies), re-farm once and retry
-            if data is None:
-                logger.info("Condor: API search failed, re-farming cookies")
-                cookies = await self._farm_cookies(req)
+            # Fast path: try cookieless API first (works as of Mar 2026)
+            data = await self._api_search(req, cookies=[])
+            if data:
+                logger.info("Condor: cookieless API succeeded")
+            else:
+                # Slow path: farm cookies and retry
+                cookies = await self._ensure_cookies(req)
                 if cookies:
                     data = await self._api_search(req, cookies)
 
-            # If API still fails, fall back to full Playwright
-            if not data:
-                logger.warning("Condor: API search returned no data, falling back to Playwright")
-                return await self._playwright_fallback(req, t0)
+                # Re-farm once if stale
+                if data is None and cookies:
+                    logger.info("Condor: API search failed, re-farming cookies")
+                    cookies = await self._farm_cookies(req)
+                    if cookies:
+                        data = await self._api_search(req, cookies)
+
+                # Last resort: full Playwright
+                if not data:
+                    logger.warning("Condor: API returned no data, falling back to Playwright")
+                    return await self._playwright_fallback(req, t0)
 
             elapsed = time.monotonic() - t0
             offers = self._parse_response(data, req)
@@ -288,7 +279,7 @@ class CondorConnectorClient:
         """Synchronous curl_cffi vacancies search."""
         sess = cffi_requests.Session(impersonate=_IMPERSONATE)
 
-        # Load farmed cookies into session
+        # Load farmed cookies into session (may be empty for cookieless path)
         for c in cookies:
             domain = c.get("domain", "")
             sess.cookies.set(c["name"], c["value"], domain=domain)

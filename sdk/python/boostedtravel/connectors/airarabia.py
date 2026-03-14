@@ -45,7 +45,7 @@ from typing import Optional
 
 import httpx
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -129,7 +129,7 @@ class AirArabiaConnectorClient:
         country = _ORIGIN_COUNTRY.get(req.origin)
         if not country:
             # Fallback: resolve via shared airport→country map
-            from boostedtravel.connectors.airline_routes import get_country
+            from connectors.airline_routes import get_country
             country = get_country(req.origin)
         if not country:
             logger.debug(

@@ -43,14 +43,14 @@ from typing import Optional
 
 from curl_cffi import requests as cffi_requests
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from boostedtravel.connectors.browser import stealth_popen_kwargs, find_chrome, _launched_procs
+from connectors.browser import stealth_popen_kwargs, find_chrome, _launched_procs
 
 logger = logging.getLogger(__name__)
 

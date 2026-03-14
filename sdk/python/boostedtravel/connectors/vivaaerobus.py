@@ -24,7 +24,7 @@ from typing import Any
 
 from curl_cffi.requests import AsyncSession
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,

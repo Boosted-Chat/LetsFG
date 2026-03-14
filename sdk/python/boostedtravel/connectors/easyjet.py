@@ -33,14 +33,14 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from boostedtravel.connectors.browser import stealth_popen_kwargs
+from connectors.browser import find_chrome, stealth_popen_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -61,23 +61,6 @@ _browser = None
 _chrome_proc = None
 _browser_lock: Optional[asyncio.Lock] = None
 _context = None
-
-
-def _find_chrome() -> Optional[str]:
-    """Find Chrome executable on the system."""
-    candidates = [
-        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
-        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
-        os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/chromium-browser",
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    ]
-    for c in candidates:
-        if os.path.isfile(c):
-            return c
-    return None
 
 
 def _get_lock() -> asyncio.Lock:
@@ -109,7 +92,7 @@ async def _get_context():
 
 
 async def _get_browser():
-    """Launch real Chrome via subprocess + connect via CDP."""
+    """Launch real Chrome via CDP (headed — Akamai blocks headless)."""
     global _pw_instance, _browser, _chrome_proc
     lock = _get_lock()
     async with lock:
@@ -121,70 +104,47 @@ async def _get_browser():
                 pass
 
         from playwright.async_api import async_playwright
+        from connectors.browser import find_chrome, stealth_popen_kwargs, _launched_procs
 
-        if _pw_instance:
-            try:
-                await _pw_instance.stop()
-            except Exception:
-                pass
-        _pw_instance = await async_playwright().start()
-
-        chrome_path = _find_chrome()
-        if chrome_path:
-            os.makedirs(_USER_DATA_DIR, exist_ok=True)
-            # Try connecting to already-running Chrome
-            try:
-                _browser = await _pw_instance.chromium.connect_over_cdp(
-                    f"http://localhost:{_DEBUG_PORT}"
-                )
-                logger.info("easyJet: connected to existing Chrome via CDP")
-                return _browser
-            except Exception:
-                pass
-
-            # Launch new Chrome — HEADED (no --headless), Akamai blocks headless.
-            # Off-screen + minimised so it doesn't disturb the user.
-            _chrome_proc = subprocess.Popen(
-                [
-                    chrome_path,
-                    f"--remote-debugging-port={_DEBUG_PORT}",
-                    f"--user-data-dir={_USER_DATA_DIR}",
-                    "--window-size=1366,768",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-http2",
-                    "--window-position=-2400,-2400",
-                    "about:blank",
-                ],
-                **stealth_popen_kwargs(),
-            )
-            await asyncio.sleep(2.5)
-            try:
-                _browser = await _pw_instance.chromium.connect_over_cdp(
-                    f"http://localhost:{_DEBUG_PORT}"
-                )
-                logger.info("easyJet: CDP Chrome connected (port %d)", _DEBUG_PORT)
-                return _browser
-            except Exception as e:
-                logger.warning("easyJet: CDP connect failed: %s, falling back", e)
-                if _chrome_proc:
-                    _chrome_proc.terminate()
-                    _chrome_proc = None
-
-        # Fallback: regular Playwright headed
+        # Try connecting to existing Chrome on the port first
+        pw = None
         try:
-            _browser = await _pw_instance.chromium.launch(
-                headless=False,
-                channel="chrome",
-                args=["--disable-blink-features=AutomationControlled", "--window-position=-2400,-2400"],
-            )
+            pw = await async_playwright().start()
+            _browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{_DEBUG_PORT}")
+            _pw_instance = pw
+            logger.info("easyJet: connected to existing Chrome on port %d", _DEBUG_PORT)
+            return _browser
         except Exception:
-            _browser = await _pw_instance.chromium.launch(
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--window-position=-2400,-2400"],
-            )
-        logger.info("easyJet: Playwright browser launched (headed fallback)")
+            if pw:
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+
+        # Launch Chrome HEADED (no --headless) — Akamai 403s headless Chrome.
+        # Off-screen + minimised so it doesn't disturb the user.
+        chrome = find_chrome()
+        os.makedirs(_USER_DATA_DIR, exist_ok=True)
+        args = [
+            chrome,
+            f"--remote-debugging-port={_DEBUG_PORT}",
+            f"--user-data-dir={_USER_DATA_DIR}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-http2",
+            "--window-position=-2400,-2400",
+            "--window-size=1366,768",
+            "about:blank",
+        ]
+        _chrome_proc = subprocess.Popen(args, **stealth_popen_kwargs())
+        _launched_procs.append(_chrome_proc)
+        await asyncio.sleep(2.0)
+
+        pw = await async_playwright().start()
+        _pw_instance = pw
+        _browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{_DEBUG_PORT}")
+        logger.info("easyJet: Chrome launched headed on CDP port %d (pid %d)", _DEBUG_PORT, _chrome_proc.pid)
         return _browser
 
 
@@ -293,7 +253,7 @@ class EasyjetConnectorClient:
                         data = await response.json()
                         if isinstance(data, dict) and "journeyPairs" in data:
                             search_data.update(data)
-                            logger.info("easyJet: captured search response (%d bytes)", len(await response.text()))
+                            logger.info("easyJet: captured search API response")
                     except Exception as e:
                         logger.warning("easyJet: failed to parse API response: %s", e)
 
@@ -406,6 +366,14 @@ class EasyjetConnectorClient:
     async def _fill_airport_field(self, page, label: str, iata: str) -> bool:
         """Fill an airport textbox and select the matching suggestion."""
         try:
+            # Remove any overlays that might intercept clicks
+            await page.evaluate("""() => {
+                document.querySelectorAll(
+                    '.modal-lightbox-wrapper, .account-modal, .modal__dialog-wrapper, ' +
+                    '[class*="overlay"][style*="z-index"]'
+                ).forEach(el => el.remove());
+            }""")
+
             field = page.get_by_role("textbox", name=label)
             if label == "From":
                 clear_name = "Clear selected departure airport"
@@ -426,7 +394,6 @@ class EasyjetConnectorClient:
             await asyncio.sleep(2.0)
 
             # Try multiple selector strategies for the autocomplete dropdown
-            # Strategy 1: option role (listbox pattern)
             for role in ("option", "radio", "listitem"):
                 try:
                     option = page.get_by_role(role, name=re.compile(
@@ -435,11 +402,14 @@ class EasyjetConnectorClient:
                     if await option.count() > 0:
                         await option.click(timeout=3000)
                         logger.info("easyJet: selected %s airport via %s role", iata, role)
+                        # Close any lingering dropdown overlays
+                        await asyncio.sleep(0.3)
+                        await page.keyboard.press("Escape")
+                        await asyncio.sleep(0.3)
                         return True
                 except Exception:
                     continue
 
-            # Strategy 2: data-testid or aria selectors
             for sel in (
                 f'[data-testid*="airport"] >> text=/{re.escape(iata)}/i',
                 f'li:has-text("{iata}")',
@@ -451,11 +421,13 @@ class EasyjetConnectorClient:
                     if await el.count() > 0:
                         await el.click(timeout=3000)
                         logger.info("easyJet: selected %s airport via locator", iata)
+                        await asyncio.sleep(0.3)
+                        await page.keyboard.press("Escape")
+                        await asyncio.sleep(0.3)
                         return True
                 except Exception:
                     continue
 
-            # Strategy 3: click first visible dropdown item
             for sel in (
                 '[role="listbox"] [role="option"]',
                 '[class*="airport"] li',
@@ -468,6 +440,9 @@ class EasyjetConnectorClient:
                     if await item.count() > 0:
                         await item.click(timeout=3000)
                         logger.info("easyJet: selected first dropdown item for %s", iata)
+                        await asyncio.sleep(0.3)
+                        await page.keyboard.press("Escape")
+                        await asyncio.sleep(0.3)
                         return True
                 except Exception:
                     continue
@@ -482,7 +457,6 @@ class EasyjetConnectorClient:
         """Open the date picker and select the outbound date."""
         target = req.date_from
         try:
-            # Open the date picker
             try:
                 date_field = page.get_by_role("textbox", name="Clear selected travel date")
                 if await date_field.count() == 0:
@@ -493,7 +467,6 @@ class EasyjetConnectorClient:
                 await when_section.click(timeout=3000)
             await asyncio.sleep(0.5)
 
-            # Wait for the calendar grid to load (prices may take time)
             try:
                 await page.wait_for_selector(
                     '[data-testid="month-title"]', timeout=10000
@@ -503,15 +476,12 @@ class EasyjetConnectorClient:
                 return False
             await asyncio.sleep(0.3)
 
-            # Primary selector: data-testid="day-month-year"
             testid = f"{target.day}-{target.month}-{target.year}"
             day_btn = page.locator(f'[data-testid="{testid}"]')
 
-            # Fallback selector: aria-label="Month day, year"
             aria_label = f"{target.strftime('%B')} {target.day}, {target.year}"
             day_btn_fallback = page.get_by_role("button", name=aria_label)
 
-            # Navigate months until target day button is rendered
             for attempt in range(12):
                 if await day_btn.count() > 0 or await day_btn_fallback.count() > 0:
                     break
@@ -521,7 +491,6 @@ class EasyjetConnectorClient:
                 except Exception:
                     break
 
-            # Try primary, then fallback
             if await day_btn.count() > 0:
                 await day_btn.click(timeout=5000)
                 logger.info("easyJet: clicked date %s (testid: %s)", target, testid)
@@ -529,7 +498,6 @@ class EasyjetConnectorClient:
                 await day_btn_fallback.click(timeout=5000)
                 logger.info("easyJet: clicked date %s (aria-label fallback)", target)
             else:
-                # Last resort: JS-based click
                 clicked = await page.evaluate("""(args) => {
                     const [testid, ariaLabel] = args;
                     let btn = document.querySelector(`[data-testid="${testid}"]`);
@@ -562,7 +530,6 @@ class EasyjetConnectorClient:
     def _parse_journey_pairs(
         self, journey_pairs: list, req: FlightSearchRequest, currency: str
     ) -> list[FlightOffer]:
-        """Parse journeyPairs from window.appData.searchResult into FlightOffers."""
         offers: list[FlightOffer] = []
         target_date = req.date_from.strftime("%Y-%m-%d")
         booking_url = self._build_booking_url(req)
@@ -571,10 +538,8 @@ class EasyjetConnectorClient:
             outbound = pair.get("outbound", {})
             flights_by_date = outbound.get("flights", {})
 
-            # flights is a dict keyed by date string
             matched_dates = [dk for dk in flights_by_date if dk == target_date]
             if not matched_dates:
-                # No exact match — use all available dates (±window from search)
                 available = list(flights_by_date.keys())
                 logger.warning(
                     "easyJet: target %s not in flight dates %s, using all",
@@ -593,11 +558,9 @@ class EasyjetConnectorClient:
     def _parse_single_flight(
         self, flight: dict, currency: str, booking_url: str
     ) -> Optional[FlightOffer]:
-        """Parse a single easyJet flight dict into a FlightOffer."""
         if flight.get("soldOut") or flight.get("saleableStatus") != "AVAILABLE":
             return None
 
-        # Extract cheapest fare price
         fares = flight.get("fares", {})
         adt_fares = fares.get("ADT", {})
         price = None

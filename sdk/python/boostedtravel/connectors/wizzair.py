@@ -30,14 +30,14 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from boostedtravel.connectors.browser import stealth_popen_kwargs
+from connectors.browser import find_chrome, stealth_popen_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -72,23 +72,6 @@ _api_version: Optional[str] = None  # e.g. "28.1.0"
 _page_ready = False              # True once KPSDK is loaded
 
 
-def _find_chrome() -> Optional[str]:
-    """Find Chrome executable on the system."""
-    candidates = [
-        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
-        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
-        os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/chromium-browser",
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    ]
-    for c in candidates:
-        if os.path.isfile(c):
-            return c
-    return None
-
-
 def _get_lock() -> asyncio.Lock:
     global _browser_lock
     if _browser_lock is None:
@@ -97,7 +80,7 @@ def _get_lock() -> asyncio.Lock:
 
 
 async def _get_browser():
-    "Launch real Chrome via CDP (headed — KPSDK detects --headless=new)."""
+    """Launch real Chrome via CDP (headed — KPSDK detects --headless=new)."""
     global _pw_instance, _browser, _chrome_proc
     lock = _get_lock()
     async with lock:
@@ -117,18 +100,20 @@ async def _get_browser():
                 pass
         _pw_instance = await async_playwright().start()
 
-        chrome_path = _find_chrome()
+        # Try connecting to already-running Chrome on the debug port
+        try:
+            _browser = await _pw_instance.chromium.connect_over_cdp(
+                f"http://localhost:{_DEBUG_PORT}"
+            )
+            logger.info("Wizzair: connected to existing Chrome via CDP")
+            return _browser
+        except Exception:
+            pass
+
+        # Launch real Chrome WITHOUT --headless=new (Kasada fingerprints it)
+        chrome_path = find_chrome()
         if chrome_path:
             os.makedirs(_USER_DATA_DIR, exist_ok=True)
-            try:
-                _browser = await _pw_instance.chromium.connect_over_cdp(
-                    f"http://localhost:{_DEBUG_PORT}"
-                )
-                logger.info("Wizzair: connected to existing Chrome via CDP")
-                return _browser
-            except Exception:
-                pass
-
             vp = random.choice(_VIEWPORTS)
             _chrome_proc = subprocess.Popen(
                 [
@@ -168,11 +153,9 @@ async def _get_browser():
         except Exception:
             _browser = await _pw_instance.chromium.launch(
                 headless=False,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--window-position=-2400,-2400",
-                ],
+                args=["--disable-blink-features=AutomationControlled",
+                      "--no-sandbox",
+                      "--window-position=-2400,-2400"],
             )
         logger.info("Wizzair: Playwright browser launched (headed fallback)")
         return _browser

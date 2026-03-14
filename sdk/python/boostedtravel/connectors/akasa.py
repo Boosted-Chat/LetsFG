@@ -37,7 +37,7 @@ from typing import Any, Optional
 
 from curl_cffi import requests as cffi_requests
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,

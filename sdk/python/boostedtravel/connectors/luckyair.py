@@ -36,7 +36,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -65,22 +65,8 @@ async def _get_browser():
     global _browser, _pw_instance
     if _browser and _browser.is_connected():
         return _browser
-
-    from playwright.async_api import async_playwright
-    from boostedtravel.connectors.browser import stealth_args
-    _pw_instance = await async_playwright().start()
-    _args = [*stealth_args(), "--lang=zh-CN"]
-    try:
-        _browser = await _pw_instance.chromium.launch(
-            headless=True,
-            channel="chrome",
-            args=_args,
-        )
-    except Exception:
-        _browser = await _pw_instance.chromium.launch(
-            headless=True,
-            args=_args,
-        )
+    from connectors.browser import launch_headed_browser
+    _browser = await launch_headed_browser(extra_args=["--lang=zh-CN"])
     logger.info("Lucky Air: browser launched")
     return _browser
 

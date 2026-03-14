@@ -27,12 +27,11 @@ import logging
 import os
 import random
 import re
-import subprocess
 import time
 from datetime import datetime
 from typing import Any, Optional
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -56,47 +55,44 @@ _TIMEZONES = [
     "Asia/Singapore", "Asia/Bangkok",
 ]
 
-# ── Shared browser singleton via CDP ────────────────────────────────────
-_CDP_PORT = 9460
-_chrome_proc = None
-_browser = None
-_browser_lock: Optional[asyncio.Lock] = None
+# ── Shared browser context (headed Chrome, persistent) ──────────────────
+_ctx = None
+_ctx_lock: Optional[asyncio.Lock] = None
 
 
 def _get_lock() -> asyncio.Lock:
-    global _browser_lock
-    if _browser_lock is None:
-        _browser_lock = asyncio.Lock()
-    return _browser_lock
+    global _ctx_lock
+    if _ctx_lock is None:
+        _ctx_lock = asyncio.Lock()
+    return _ctx_lock
 
 
-async def _get_browser():
-    """Connect to a real Chrome instance via CDP (launched once, reused)."""
-    global _chrome_proc, _browser
+async def _get_context():
+    """Launch a persistent headed-Chrome context (reused across searches)."""
+    global _ctx
     lock = _get_lock()
     async with lock:
-        if _browser and _browser.is_connected():
-            return _browser
+        if _ctx and _ctx.browser:
+            return _ctx
         from playwright.async_api import async_playwright
-
-        from boostedtravel.connectors.browser import find_chrome, stealth_args, stealth_popen_kwargs
-        chrome_path = find_chrome()
-        user_data = os.path.join(os.environ.get("TEMP", "/tmp"), "chrome-cdp-indigo")
-        _chrome_proc = subprocess.Popen([
-            chrome_path,
-            f"--remote-debugging-port={_CDP_PORT}",
-            f"--user-data-dir={user_data}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-blink-features=AutomationControlled",
-            *stealth_args(),
-        ], **stealth_popen_kwargs())
-        await asyncio.sleep(1.5)
-
         pw = await async_playwright().start()
-        _browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{_CDP_PORT}")
-        logger.info("IndiGo: Connected to real Chrome via CDP (port %d)", _CDP_PORT)
-        return _browser
+        user_data = os.path.join(os.environ.get("TEMP", "/tmp"), "chrome-indigo-ctx")
+        os.makedirs(user_data, exist_ok=True)
+        vp = random.choice(_VIEWPORTS)
+        _ctx = await pw.chromium.launch_persistent_context(
+            user_data, channel="chrome", headless=False,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--window-position=-2400,-2400",
+                f"--window-size={vp['width']},{vp['height']}",
+            ],
+            viewport=vp,
+            locale=random.choice(_LOCALES),
+            timezone_id=random.choice(_TIMEZONES),
+            service_workers="block",
+        )
+        logger.info("IndiGo: headed Chrome context ready")
+        return _ctx
 
 
 class IndiGoConnectorClient:
@@ -121,12 +117,7 @@ class IndiGoConnectorClient:
 
     async def _try_search(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
-        browser = await _get_browser()
-        context = await browser.new_context(
-            viewport=random.choice(_VIEWPORTS),
-            locale=random.choice(_LOCALES),
-            timezone_id=random.choice(_TIMEZONES),
-        )
+        context = await _get_context()
 
         try:
             page = await context.new_page()
@@ -233,7 +224,10 @@ class IndiGoConnectorClient:
             logger.error("IndiGo Playwright error: %s", e)
             return self._empty(req)
         finally:
-            await context.close()
+            try:
+                await page.close()
+            except Exception:
+                pass
 
     async def _dismiss_cookies(self, page) -> None:
         # IndiGo has a minimal cookie notice — try to close it
@@ -325,30 +319,27 @@ class IndiGoConnectorClient:
             await asyncio.sleep(1.5)
 
             # Step 3: Click the matching suggestion.
-            # Suggestions show IATA code as text in a child element; find and click.
-            # First try: a container element whose inner text includes the exact IATA code
-            sugg = page.locator(
-                f".search-widget-form-body__from .airport-search-list-item :text-is('{iata}'), "
-                f".search-widget-form-body__to .airport-search-list-item :text-is('{iata}'), "
-                f".popover__wrapper .airport-search-list-item :text-is('{iata}')"
-            )
+            # IndiGo now uses .city-selection__list-item-wrapper for suggestion items.
+            # Each item has the IATA code as text in a child element.
+            sugg = page.locator(".city-selection__list-item-wrapper")
             if await sugg.count() > 0:
+                # Try to find the exact IATA match
+                for i in range(min(await sugg.count(), 20)):
+                    item = sugg.nth(i)
+                    try:
+                        if not await item.is_visible():
+                            continue
+                        text = await item.inner_text()
+                        if iata in text:
+                            await item.click(timeout=3000)
+                            return True
+                    except Exception:
+                        continue
+                # If no exact match, click the first visible item
                 await sugg.first.click(timeout=3000)
                 return True
 
-            # Second try: any visible element whose text exactly matches the IATA code
-            # (excluding the input itself)
-            exact_match = page.locator(f"div:text-is('{iata}'), span:text-is('{iata}')")
-            for i in range(await exact_match.count()):
-                el = exact_match.nth(i)
-                try:
-                    if await el.is_visible() and (await el.inner_text()).strip() == iata:
-                        await el.click(timeout=3000)
-                        return True
-                except Exception:
-                    continue
-
-            # Third try: keyboard selection (ArrowDown + Enter)
+            # Fallback: keyboard selection (ArrowDown + Enter)
             await page.keyboard.press("ArrowDown")
             await asyncio.sleep(0.3)
             await page.keyboard.press("Enter")

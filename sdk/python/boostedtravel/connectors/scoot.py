@@ -38,14 +38,14 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from boostedtravel.connectors.browser import stealth_popen_kwargs
+from connectors.browser import find_chrome, stealth_popen_kwargs, _launched_procs
 
 logger = logging.getLogger(__name__)
 
@@ -70,23 +70,6 @@ _pw_instance = None
 _browser = None
 _chrome_proc = None
 _browser_lock: Optional[asyncio.Lock] = None
-
-
-def _find_chrome() -> Optional[str]:
-    """Find Chrome executable on the system."""
-    candidates = [
-        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
-        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
-        os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/chromium-browser",
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    ]
-    for c in candidates:
-        if os.path.isfile(c):
-            return c
-    return None
 
 
 def _get_lock() -> asyncio.Lock:
@@ -129,25 +112,22 @@ async def _get_browser():
                     pass
 
         # Launch Chrome HEADED (no --headless) — Akamai blocks headless Chrome.
-        chrome_path = _find_chrome()
-        if not chrome_path:
-            raise RuntimeError("Chrome not found — required for Scoot (Akamai bypass)")
+        chrome = find_chrome()
         os.makedirs(_USER_DATA_DIR, exist_ok=True)
-        _chrome_proc = subprocess.Popen(
-            [
-                chrome_path,
-                f"--remote-debugging-port={_DEBUG_PORT}",
-                f"--user-data-dir={_USER_DATA_DIR}",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-http2",
-                "--window-position=-2400,-2400",
-                "--window-size=1366,768",
-                "about:blank",
-            ],
-            **stealth_popen_kwargs(),
-        )
+        args = [
+            chrome,
+            f"--remote-debugging-port={_DEBUG_PORT}",
+            f"--user-data-dir={_USER_DATA_DIR}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-http2",
+            "--window-position=-2400,-2400",
+            "--window-size=1366,768",
+            "about:blank",
+        ]
+        _chrome_proc = subprocess.Popen(args, **stealth_popen_kwargs())
+        _launched_procs.append(_chrome_proc)
         await asyncio.sleep(2.0)
 
         pw = await async_playwright().start()

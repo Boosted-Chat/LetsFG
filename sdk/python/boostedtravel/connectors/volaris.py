@@ -29,7 +29,7 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -649,4 +649,3 @@ class VolarisConnectorClient:
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
             currency=req.currency or "MXN", offers=[], total_results=0,
         )
-

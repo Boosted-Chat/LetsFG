@@ -24,14 +24,14 @@ from typing import Any, Optional
 
 from curl_cffi import requests as cffi_requests
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from boostedtravel.connectors.browser import stealth_args, stealth_popen_kwargs
+from connectors.browser import stealth_args, stealth_popen_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -46,18 +46,12 @@ _TIMEZONES = ["Europe/London", "Europe/Berlin", "Europe/Paris", "Europe/Vienna"]
 
 _CDP_PORT = 9455
 _USER_DATA_DIR = os.path.join(os.environ.get("TEMP", "/tmp"), "eurowings_cdp_data")
-_CHROME_PATHS = [
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    "/usr/bin/google-chrome",
-    "/usr/bin/google-chrome-stable",
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-]
 
 _API_URL = "https://apps.eurowings.com/flightsearch/v1/booking/flight-data?action=QUERY_FLIGHT_DATA"
 _IMPERSONATE = "chrome136"
 _COOKIE_MAX_AGE = 25 * 60  # 25 minutes
 
+# ── Module-level singletons ──────────────────────────────────────────────────
 _chrome_proc: subprocess.Popen | None = None
 _pw_instance = None
 _cdp_browser = None
@@ -82,59 +76,17 @@ def _get_farm_lock() -> asyncio.Lock:
     return _farm_lock
 
 
-def _find_chrome() -> str:
-    for p in _CHROME_PATHS:
-        if os.path.isfile(p):
-            return p
-    raise FileNotFoundError("Chrome not found")
-
-
-def _launch_chrome():
-    global _chrome_proc
-    if _chrome_proc and _chrome_proc.poll() is None:
-        return
-    os.makedirs(_USER_DATA_DIR, exist_ok=True)
-    chrome = _find_chrome()
-    _chrome_proc = subprocess.Popen(
-        [
-            chrome,
-            f"--remote-debugging-port={_CDP_PORT}",
-            f"--user-data-dir={_USER_DATA_DIR}",
-            "--disable-blink-features=AutomationControlled",
-            "--no-first-run", "--no-default-browser-check",
-            "--disable-background-timer-throttling",
-            "--disable-backgrounding-occluded-windows",
-            "--disable-renderer-backgrounding",
-            *stealth_args(),
-        ],
-        **stealth_popen_kwargs(),
-    )
-    logger.info("Eurowings: Chrome launched on CDP port %d (pid=%d)", _CDP_PORT, _chrome_proc.pid)
-
-
 async def _get_browser():
     """Shared real Chrome via CDP (launched once, reused across searches)."""
-    global _pw_instance, _cdp_browser
+    global _pw_instance, _cdp_browser, _chrome_proc
     lock = _get_lock()
     async with lock:
         if _cdp_browser and _cdp_browser.is_connected():
             return _cdp_browser
-        _launch_chrome()
-        await asyncio.sleep(2)
-        from playwright.async_api import async_playwright
-        if not _pw_instance:
-            _pw_instance = await async_playwright().start()
-        for attempt in range(5):
-            try:
-                _cdp_browser = await _pw_instance.chromium.connect_over_cdp(
-                    f"http://127.0.0.1:{_CDP_PORT}"
-                )
-                logger.info("Eurowings: connected to Chrome via CDP")
-                return _cdp_browser
-            except Exception:
-                if attempt < 4:
-                    await asyncio.sleep(1)
-        raise RuntimeError(f"Eurowings: cannot connect to Chrome CDP on port {_CDP_PORT}")
+        from connectors.browser import get_or_launch_cdp
+        _cdp_browser, _chrome_proc = await get_or_launch_cdp(_CDP_PORT, _USER_DATA_DIR)
+        logger.info("Eurowings: Chrome ready via CDP (port %d)", _CDP_PORT)
+        return _cdp_browser
 
 
 class EurowingsConnectorClient:

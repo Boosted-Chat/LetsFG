@@ -1,23 +1,22 @@
 """
-Batik Air Playwright scraper — browser form-fill + DOM extraction.
+Batik Air scraper — nodriver CF bypass + Playwright DOM extraction.
 
 Batik Air (IATA: ID) is an Indonesian full-service carrier (Lion Air Group).
 Website: www.batikair.com.my (Malaysia hub).
 
-Strategy:
-1. Navigate to batikair.com.my homepage (Cloudflare challenge auto-resolves)
-2. Remove popup overlays (#__st_overlay_popup, ant-modal-wrap)
-3. Click "One-way" radio
-4. Fill Ant Design combobox airports (type IATA → JS click [title] option)
-5. Pick date from Ant Design calendar table
-6. Click search → navigates to /book/flight-search
-7. Extract flight cards from results DOM
+Strategy (nodriver + Playwright hybrid, discovered Mar 2026):
+1. nodriver (headed, off-screen) launches Chrome → auto-bypasses Cloudflare Turnstile (~6s)
+2. Playwright connects to the same Chrome via CDP for reliable DOM interaction
+3. Fill Ant Design combobox airports (type IATA → JS click [title] option)
+4. Pick date from Ant Design calendar table
+5. Click search → navigates to /book/flight-search
+6. Extract flight cards from results DOM
+
+CF Turnstile note: Only nodriver headed (headless=False) passes Turnstile.
+Playwright persistent context, CDP headless, curl_cffi all fail.
 
 API note: search.batikair.com.my/flightrr_api/api/get/Flights uses
-encrypted payloads {"payload":"<encrypted>"} — not replayable without
-reverse-engineering the JS. DOM extraction is the reliable approach.
-
-Discovered via MCP Playwright probing, Mar 2026.
+encrypted payloads — not replayable. DOM extraction is the reliable approach.
 """
 
 from __future__ import annotations
@@ -28,12 +27,11 @@ import logging
 import os
 import random
 import re
-import subprocess
 import time
 from datetime import datetime
 from typing import Any, Optional
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -49,10 +47,10 @@ _VIEWPORTS = [
     {"width": 1920, "height": 1080},
 ]
 
-# ── Shared browser singleton via CDP ────────────────────────────────────
-_CDP_PORT = 9458
-_chrome_proc = None
-_browser = None
+# ── nodriver + Playwright hybrid browser ───────────────────────────────
+_nd_browser = None          # nodriver browser instance (owns the Chrome process)
+_pw_instance = None         # Playwright async API instance
+_pw_browser = None          # Playwright CDP browser (connected to nodriver's Chrome)
 _browser_lock: Optional[asyncio.Lock] = None
 
 
@@ -63,33 +61,81 @@ def _get_lock() -> asyncio.Lock:
     return _browser_lock
 
 
-async def _get_browser():
-    """Connect to a real Chrome instance via CDP (launched once, reused)."""
-    global _chrome_proc, _browser
+async def _ensure_browser():
+    """Launch nodriver Chrome, bypass CF Turnstile, connect Playwright via CDP.
+
+    Returns a Playwright BrowserContext connected to the nodriver Chrome.
+    Reuses existing browser if still alive.
+    """
+    global _nd_browser, _pw_instance, _pw_browser
     lock = _get_lock()
     async with lock:
-        if _browser and _browser.is_connected():
-            return _browser
+        # Check if existing connection is still alive
+        if _pw_browser:
+            try:
+                if _pw_browser.is_connected():
+                    return _pw_browser.contexts[0]
+            except Exception:
+                pass
+            _pw_browser = None
+
+        # Clean up old Playwright instance
+        if _pw_instance:
+            try:
+                await _pw_instance.stop()
+            except Exception:
+                pass
+            _pw_instance = None
+
+        # Clean up old nodriver browser
+        if _nd_browser:
+            try:
+                _nd_browser.stop()
+            except Exception:
+                pass
+            _nd_browser = None
+
+        import nodriver as uc
+
+        # Launch nodriver headed (MUST be headless=False for CF Turnstile bypass)
+        _nd_browser = await uc.start(
+            headless=False,
+            browser_args=[
+                "--window-size=1366,768",
+                "--window-position=-2400,-2400",
+            ],
+        )
+
+        # Navigate to homepage and wait for CF Turnstile to pass
+        page = await _nd_browser.get("https://www.batikair.com.my/")
+        for i in range(25):
+            await asyncio.sleep(1)
+            title = await page.evaluate("document.title")
+            if "Just a moment" not in str(title):
+                logger.info("BatikAir: Cloudflare passed in %ds", i + 1)
+                break
+        else:
+            logger.warning("BatikAir: Cloudflare Turnstile did not pass after 25s")
+            _nd_browser.stop()
+            _nd_browser = None
+            return None
+
+        # Let React SPA hydrate after CF pass
+        await asyncio.sleep(3)
+
+        # Connect Playwright to nodriver's Chrome via CDP
         from playwright.async_api import async_playwright
 
-        from boostedtravel.connectors.browser import find_chrome, stealth_args, stealth_popen_kwargs
-        chrome_path = find_chrome()
-        user_data = os.path.join(os.environ.get("TEMP", "/tmp"), "chrome-cdp-batikair")
-        _chrome_proc = subprocess.Popen([
-            chrome_path,
-            f"--remote-debugging-port={_CDP_PORT}",
-            f"--user-data-dir={user_data}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-blink-features=AutomationControlled",
-            *stealth_args(),
-        ], **stealth_popen_kwargs())
-        await asyncio.sleep(1.5)
+        _pw_instance = await async_playwright().start()
+        port = _nd_browser.config.port
+        host = _nd_browser.config.host or "127.0.0.1"
+        _pw_browser = await _pw_instance.chromium.connect_over_cdp(
+            f"http://{host}:{port}"
+        )
+        logger.info("BatikAir: Playwright connected via CDP to %s:%s", host, port)
 
-        pw = await async_playwright().start()
-        _browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{_CDP_PORT}")
-        logger.info("BatikAir: Connected to real Chrome via CDP (port %d)", _CDP_PORT)
-        return _browser
+        ctx = _pw_browser.contexts[0]
+        return ctx
 
 
 class BatikAirConnectorClient:
@@ -103,20 +149,14 @@ class BatikAirConnectorClient:
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
-        browser = await _get_browser()
-        context = await browser.new_context(
-            viewport=random.choice(_VIEWPORTS),
-            locale="en-US",
-            timezone_id="Asia/Jakarta",
-            service_workers="block",
-        )
+        context = await _ensure_browser()
+        if context is None:
+            logger.warning("BatikAir: browser launch / CF bypass failed")
+            return self._empty(req)
+
+        page = None
         try:
-            try:
-                from playwright_stealth import stealth_async
-                page = await context.new_page()
-                await stealth_async(page)
-            except ImportError:
-                page = await context.new_page()
+            page = await context.new_page()
 
             # --- API response interception (in case response is unencrypted) ---
             captured_data: dict = {}
@@ -144,34 +184,39 @@ class BatikAirConnectorClient:
             logger.info("BatikAir: loading homepage for %s→%s", req.origin, req.destination)
             await page.goto("https://www.batikair.com.my/",
                             wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(2.0)
 
-            # Wait for Cloudflare challenge + page load
-            try:
-                await page.wait_for_selector(
-                    "input.ant-select-selection-search-input, input[role='combobox']",
-                    timeout=25000,
-                )
-            except Exception:
-                await asyncio.sleep(8)
+            # CF Turnstile already passed by nodriver during _ensure_browser(),
+            # but new pages may still hit a brief challenge. Wait if so.
+            for _ in range(15):
+                title = await page.title()
+                if "just a moment" not in title.lower():
+                    break
+                await asyncio.sleep(1)
+
+            # Wait for the search form to render (origin + destination selects)
+            # .ant-select.w-full identifies the airport selects (language select has no w-full)
+            form_ok = False
+            for _ in range(20):
+                count = await page.locator(".ant-select.w-full").count()
+                if count >= 2:
+                    form_ok = True
+                    break
+                await asyncio.sleep(0.5)
+            if not form_ok:
+                logger.warning("BatikAir: search form did not render (ant-selects: %d)", count)
 
             # Remove overlay popups
             await self._remove_overlays(page)
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
 
             # One-way
             await self._set_one_way(page)
             await asyncio.sleep(0.3)
             await self._remove_overlays(page)
 
-            # Wait for the full form to render (need 2+ Ant Design select inputs)
-            for _ in range(15):
-                count = await page.locator(
-                    "input.ant-select-selection-search-input, .ant-select"
-                ).count()
-                if count >= 2:
-                    break
-                await asyncio.sleep(0.5)
             # Origin
+            await self._remove_overlays(page)
             ok = await self._fill_airport(page, req.origin, is_origin=True)
             if not ok:
                 logger.warning("BatikAir: origin fill failed")
@@ -179,6 +224,7 @@ class BatikAirConnectorClient:
             await asyncio.sleep(0.5)
 
             # Destination
+            await self._remove_overlays(page)
             ok = await self._fill_airport(page, req.destination, is_origin=False)
             if not ok:
                 logger.warning("BatikAir: destination fill failed")
@@ -220,9 +266,17 @@ class BatikAirConnectorClient:
 
         except Exception as e:
             logger.error("BatikAir error: %s", e)
+            # If browser disconnected, invalidate it so next call re-launches
+            global _pw_browser
+            if _pw_browser and not _pw_browser.is_connected():
+                _pw_browser = None
             return self._empty(req)
         finally:
-            await context.close()
+            if page:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
 
     # ── Overlay removal ──
 
@@ -242,26 +296,21 @@ class BatikAirConnectorClient:
     # ── One-way toggle ──
 
     async def _set_one_way(self, page) -> None:
-        try:
-            radio = page.get_by_role("radio", name=re.compile(r"one.?way", re.IGNORECASE))
-            if await radio.count() > 0:
-                parent = page.locator("[class*='ant-radio-wrapper']").filter(has_text=re.compile(r"one.?way", re.IGNORECASE)).first
-                if await parent.count() > 0:
-                    await parent.click(timeout=3000)
-                    return
-                await radio.first.click(timeout=3000)
-                return
-        except Exception:
-            pass
-        # Fallback: click text
-        for label in ["One-way", "One Way", "One way"]:
-            try:
-                el = page.get_by_text(label, exact=False).first
-                if await el.count() > 0:
-                    await el.click(timeout=3000)
-                    return
-            except Exception:
-                continue
+        """Click One-way radio via JS to bypass overlay interception."""
+        clicked = await page.evaluate("""() => {
+            const labels = document.querySelectorAll('.ant-radio-wrapper');
+            for (const l of labels) {
+                if (/one.?way/i.test(l.textContent)) {
+                    l.click();
+                    return l.textContent.trim();
+                }
+            }
+            return null;
+        }""")
+        if clicked:
+            logger.debug("BatikAir: one-way selected via JS: %s", clicked)
+        else:
+            logger.debug("BatikAir: one-way radio not found")
 
     # ── Airport fill (Ant Design Select combobox) ──
 
@@ -344,74 +393,25 @@ class BatikAirConnectorClient:
     async def _find_ant_select_input(self, page, is_origin: bool):
         """Locate the correct Ant Design Select input for origin or destination.
 
-        Uses multiple strategies: aria-labels/placeholder text for context-aware
-        matching, then falls back to positional indexing of ``.ant-select``
-        containers or generic ``input[role='combobox']`` elements.
+        Batik Air uses Ant Design Selects with class ``w-full`` for airport fields.
+        The language selector (small, borderless, no ``w-full``) is at combobox
+        index 0. Origin is index 1, destination is index 2.
         """
         label = "origin" if is_origin else "destination"
 
-        # Strategy 1: Ant Design search inputs with contextual identification via JS
-        idx = await page.evaluate("""(isOrigin) => {
-            const inputs = document.querySelectorAll('input.ant-select-selection-search-input');
-            if (inputs.length === 0) return -1;
-
-            // Try identifying by aria-label, placeholder, or ancestor text
-            const keywords = isOrigin
-                ? ['from', 'origin', 'depart', 'leaving']
-                : ['to', 'destination', 'arriv', 'going'];
-
-            for (let i = 0; i < inputs.length; i++) {
-                const inp = inputs[i];
-                const aria = (inp.getAttribute('aria-label') || '').toLowerCase();
-                const ph = (inp.getAttribute('placeholder') || '').toLowerCase();
-                // Check ancestor labels up to 4 levels
-                let ancestor = inp.parentElement;
-                let ancestorText = '';
-                for (let d = 0; d < 4 && ancestor; d++) {
-                    ancestorText += ' ' + (ancestor.getAttribute('aria-label') || '')
-                        + ' ' + (ancestor.getAttribute('data-testid') || '')
-                        + ' ' + (ancestor.className || '');
-                    ancestor = ancestor.parentElement;
-                }
-                ancestorText = ancestorText.toLowerCase();
-                const combined = aria + ' ' + ph + ' ' + ancestorText;
-
-                for (const kw of keywords) {
-                    if (combined.includes(kw)) return i;
-                }
-            }
-
-            // Fallback: positional — first Ant Design select = origin, second = destination
-            if (inputs.length >= 2) return isOrigin ? 0 : 1;
-            if (inputs.length === 1 && isOrigin) return 0;
-            return -1;
-        }""", is_origin)
-
-        if idx >= 0:
-            loc = page.locator("input.ant-select-selection-search-input").nth(idx)
-            if await loc.count() > 0:
-                logger.debug("BatikAir: found ant-select-search-input[%d] for %s", idx, label)
-                return loc
-
-        # Strategy 2: Click the .ant-select-selector container to activate
-        # the hidden search input, then target the now-visible input
-        selectors = page.locator(".ant-select-selector")
-        sel_count = await selectors.count()
-        if sel_count >= 2:
+        # Strategy 1: Use .ant-select.w-full to target airport selects (skips language)
+        airport_selects = page.locator(".ant-select.w-full")
+        as_count = await airport_selects.count()
+        if as_count >= 2:
             target = 0 if is_origin else 1
-            try:
-                await selectors.nth(target).click(force=True, timeout=3000)
-                await asyncio.sleep(0.3)
-                active = page.locator("input.ant-select-selection-search-input:focus")
-                if await active.count() > 0:
-                    logger.debug("BatikAir: activated ant-select-selector[%d] for %s",
-                                 target, label)
-                    return active.first
-            except Exception:
-                pass
+            inp = airport_selects.nth(target).locator("input")
+            if await inp.count() > 0:
+                logger.debug("BatikAir: found ant-select.w-full[%d] input for %s", target, label)
+                return inp.first
 
-        # Strategy 3: Generic input[role='combobox'] with positional indexing (legacy)
-        all_combos = page.locator("input[role='combobox']")
+        # Strategy 2: Positional indexing of all combobox inputs
+        # Index 0 = language, 1 = origin, 2 = destination
+        all_combos = page.locator("[role='combobox']")
         count = await all_combos.count()
         if count >= 3:
             target_idx = 1 if is_origin else 2
@@ -422,8 +422,7 @@ class BatikAirConnectorClient:
         else:
             return None
 
-        logger.debug("BatikAir: falling back to combobox index %d/%d for %s",
-                      target_idx, count, label)
+        logger.debug("BatikAir: using combobox[%d/%d] for %s", target_idx, count, label)
         return all_combos.nth(target_idx)
 
     # ── Date picker (Ant Design Calendar) ──
@@ -431,64 +430,46 @@ class BatikAirConnectorClient:
     async def _fill_date(self, page, req: FlightSearchRequest) -> bool:
         target = req.date_from
         try:
-            # Wait for UI to stabilize after airport selection
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1.0)
+            await self._remove_overlays(page)
 
-            # Click the departure date field (Ant Design DatePicker - readonly input)
-            # Use JS click to bypass stability checks on animated elements
+            # Click the .ant-picker container to open the calendar
             clicked_cal = await page.evaluate("""() => {
-                const inputs = document.querySelectorAll('input[readonly]');
-                for (const inp of inputs) {
-                    if (inp.placeholder === 'Select date' || inp.value.match(/\\w{3},\\s/)) {
-                        inp.click();
-                        return true;
-                    }
+                const pickers = document.querySelectorAll('.ant-picker');
+                for (const pk of pickers) {
+                    const inp = pk.querySelector('input');
+                    if (inp) { pk.click(); return true; }
                 }
-                // Try textbox role with calendar name
-                const cb = document.querySelector('[placeholder*="date" i], [aria-label*="calendar" i]');
-                if (cb) { cb.click(); return true; }
                 return false;
             }""")
-
             if not clicked_cal:
-                # Playwright fallback with force
-                date_field = page.locator("input[readonly][placeholder='Select date']").first
-                if await date_field.count() > 0:
-                    await date_field.click(force=True, timeout=5000)
+                # Fallback: click readonly input with force
+                f = page.locator(".ant-picker input").first
+                if await f.count() > 0:
+                    await f.click(force=True, timeout=5000)
                 else:
                     return False
 
             await asyncio.sleep(1.0)
 
-            # Navigate to target month using Next button
+            # Navigate to target month
             target_month = target.strftime("%b")  # "Mar", "Apr" etc.
             target_year = str(target.year)
 
             for _ in range(12):
-                # Check current calendar header text
                 header_text = await page.evaluate("""() => {
-                    // Ant Design picker panel header contains month+year buttons
-                    const panel = document.querySelector('.ant-picker-dropdown, .ant-picker-panel');
-                    if (panel) return panel.textContent || '';
-                    return document.body.textContent.substring(0, 5000);
+                    const hv = document.querySelector('.ant-picker-header-view');
+                    return hv ? hv.innerText : '';
                 }""")
 
                 if target_month in header_text and target_year in header_text:
                     break
 
-                # Click Next month button (Ant Design uses aria-label "Next month (PageDown)")
                 next_clicked = await page.evaluate("""() => {
-                    const btns = document.querySelectorAll('button');
-                    for (const b of btns) {
-                        const label = b.getAttribute('aria-label') || b.title || '';
-                        if (label.toLowerCase().includes('next month')) {
-                            b.click();
-                            return true;
-                        }
-                    }
-                    // Fallback: super-next or right arrow in picker header
-                    const next = document.querySelector('.ant-picker-header-next-btn, [class*="next"]');
-                    if (next) { next.click(); return true; }
+                    const btn = document.querySelector(
+                        '.ant-picker-header-next-btn, button[aria-label*="Next month"]'
+                    );
+                    if (btn) { btn.click(); return true; }
                     return false;
                 }""")
 
@@ -500,33 +481,24 @@ class BatikAirConnectorClient:
             day = str(target.day)
 
             clicked = await page.evaluate("""(day) => {
-                // Ant Design renders days in td.ant-picker-cell elements
-                // Each cell has a .ant-picker-cell-inner div with the day text
-                const cells = document.querySelectorAll('td[class*="picker-cell"]');
+                // Use in-view cells (current month only)
+                const cells = document.querySelectorAll('td.ant-picker-cell-in-view');
                 for (const cell of cells) {
                     if (cell.classList.contains('ant-picker-cell-disabled')) continue;
-                    // Skip cells from other months
-                    if (cell.classList.contains('ant-picker-cell-in-view') === false &&
-                        cell.className.includes('in-view') === false) {
-                        // Only skip if there's an explicit out-of-view class
-                        if (cell.classList.contains('ant-picker-cell-start') ||
-                            cell.classList.contains('ant-picker-cell-end')) continue;
-                    }
-                    const inner = cell.querySelector('[class*="inner"], div, span');
-                    if (!inner) continue;
-                    // The day text may include price info like "15 1.2M"
-                    const text = inner.textContent.trim();
-                    if (text === day || text.startsWith(day + ' ') || text.startsWith(day + '\\n')) {
+                    const inner = cell.querySelector('.ant-picker-cell-inner');
+                    if (inner && inner.textContent.trim() === day) {
                         cell.click();
                         return true;
                     }
                 }
-                // Broader fallback: any td in a calendar table
-                const allCells = document.querySelectorAll('table td');
+                // Broader fallback
+                const allCells = document.querySelectorAll('td[class*="picker-cell"]');
                 for (const cell of allCells) {
-                    const text = cell.textContent.trim();
-                    if ((text === day || text.startsWith(day + ' ')) &&
-                        !cell.classList.contains('disabled')) {
+                    if (cell.classList.contains('ant-picker-cell-disabled')) continue;
+                    const inner = cell.querySelector('[class*="inner"]');
+                    if (!inner) continue;
+                    const text = inner.textContent.trim();
+                    if (text === day || text.startsWith(day + ' ') || text.startsWith(day + '\\n')) {
                         cell.click();
                         return true;
                     }
@@ -548,64 +520,65 @@ class BatikAirConnectorClient:
 
     async def _click_search(self, page) -> None:
         await self._remove_overlays(page)
-        # The search button has id="search_btn" or contains a search icon
+        # Use JS click to bypass any overlay interception
+        clicked = await page.evaluate("""() => {
+            const btn = document.querySelector('#search_btn');
+            if (btn) { btn.click(); return 'search_btn'; }
+            // Fallback: button with search text
+            const btns = document.querySelectorAll('button');
+            for (const b of btns) {
+                const text = (b.innerText || '').trim().toLowerCase();
+                if (text === 'search' || text === 'search flights') {
+                    b.click(); return text;
+                }
+            }
+            return null;
+        }""")
+        if clicked:
+            logger.debug("BatikAir: search clicked via JS: %s", clicked)
+            return
+        # Playwright force-click fallback
         try:
             btn = page.locator("#search_btn")
             if await btn.count() > 0:
-                await btn.click(timeout=5000)
+                await btn.click(force=True, timeout=5000)
                 return
-        except Exception:
-            pass
-
-        # Fallback: enabled button in the form
-        for label in ["Search", "SEARCH", "Search Flights"]:
-            try:
-                btn = page.get_by_role("button", name=re.compile(rf"^{re.escape(label)}$", re.IGNORECASE))
-                if await btn.count() > 0:
-                    await btn.first.click(timeout=5000)
-                    return
-            except Exception:
-                continue
-
-        # Last fallback: button with arrow/search img inside the form area
-        try:
-            btn = page.locator("button:not([disabled])").filter(
-                has=page.locator("img")
-            ).last
-            if await btn.count() > 0:
-                await btn.click(timeout=5000)
         except Exception:
             pass
 
     # ── DOM extraction (results page) ──
 
     async def _extract_from_dom(self, page, req: FlightSearchRequest) -> list[FlightOffer]:
-        """Parse flight cards from /book/flight-search results page."""
+        """Parse flight cards from /book/flight-search results page.
+
+        Batik Air results page uses Ant Design cards with class ``hover:scale-102``
+        containing airline, times, duration, stops and prices in MYR.
+        """
         try:
             await asyncio.sleep(2)
 
             # Wait for flight cards to appear
             try:
-                await page.wait_for_selector("[class*='flight'], [class*='card'], [class*='border']",
-                                             timeout=10000)
+                await page.wait_for_selector(".shadow-2", timeout=10000)
             except Exception:
                 pass
 
             flights = await page.evaluate("""(params) => {
-                // Strategy: extract ordered sequences from page text
-                // Flight data appears linearly: airline (flightNo) depTime arrTime route duration price
-                const body = document.body.innerText || document.body.textContent || '';
-
-                // Find all flight number occurrences with surrounding context
+                const body = document.body.innerText || '';
                 const results = [];
-                const flightPattern = /(Lion Air|Batik Air|Super Air Jet|Wings Air|Malindo Air)\\s*\\(([A-Z]{2}\\d{1,5})\\)/g;
+
+                // Match flight blocks: "Batik Air, MY(OD306)" pattern
+                const pattern = /([\\w\\s,]+?)\\(([A-Z]{2}\\d{1,5})\\)/g;
                 let match;
                 const matches = [];
-                while ((match = flightPattern.exec(body)) !== null) {
+                while ((match = pattern.exec(body)) !== null) {
+                    // Skip non-flight matches
+                    const code = match[2];
+                    if (!/^[A-Z]{2}\\d{2,5}$/.test(code)) continue;
                     matches.push({
-                        airline: match[1],
-                        flightNo: match[2],
-                        carrier: match[2].substring(0, 2),
+                        airline: match[1].replace(/,\\s*MY$/i, '').trim(),
+                        flightNo: code,
+                        carrier: code.substring(0, 2),
                         index: match.index,
                     });
                 }
@@ -613,29 +586,38 @@ class BatikAirConnectorClient:
                 for (let i = 0; i < matches.length; i++) {
                     const m = matches[i];
                     const nextIdx = (i + 1 < matches.length) ? matches[i + 1].index : body.length;
-                    const block = body.substring(m.index, Math.min(nextIdx, m.index + 500));
+                    const block = body.substring(m.index, Math.min(nextIdx, m.index + 600));
 
-                    // Extract times from block (HH:MM pattern)
+                    // Times: HH:MM
                     const times = block.match(/(\\d{2}:\\d{2})/g) || [];
                     const depTime = times[0] || '';
                     const arrTime = times[1] || '';
 
-                    // Extract duration
-                    const durMatch = block.match(/(\\d+)\\s*hr\\s*(\\d+)\\s*m/i);
+                    // Duration: "3HR" or "3HR 10M"
+                    const durMatch = block.match(/(\\d+)\\s*HR\\s*(?:(\\d+)\\s*M)?/i);
                     let durSec = 0;
-                    if (durMatch) durSec = parseInt(durMatch[1]) * 3600 + parseInt(durMatch[2]) * 60;
+                    if (durMatch) {
+                        durSec = parseInt(durMatch[1]) * 3600;
+                        if (durMatch[2]) durSec += parseInt(durMatch[2]) * 60;
+                    }
 
-                    // Is non-stop?
-                    const isNonstop = /non.?stop/i.test(block);
-                    const stops = isNonstop ? 0 : (block.match(/(\\d+)\\s*stop/i)?.[1] || 0);
+                    // Stops
+                    const isNonstop = /NON[\\s-]*STOP/i.test(block);
+                    const stopMatch = block.match(/(\\d+)\\s*STOP/i);
+                    const stops = isNonstop ? 0 : (stopMatch ? parseInt(stopMatch[1]) : 0);
 
-                    // Extract price - look for "Rp X,XXX,XXX" or "IDR X,XXX"
-                    const priceMatches = block.match(/Rp\\s*([\\d,]+)/g) || [];
+                    // Price: "RM 449.00" or "RM 1,449.00"
+                    const econIdx = block.search(/ECONOMY/i);
+                    let priceBlock = econIdx >= 0 ? block.substring(econIdx) : block;
+                    const priceMatch = priceBlock.match(/RM\\s*([\\d,]+\\.\\d{2})/);
                     let price = 0;
-                    if (priceMatches.length > 0) {
-                        // First price is usually economy
-                        const pStr = priceMatches[0].replace(/Rp\\s*/, '').replace(/,/g, '');
-                        price = parseInt(pStr) || 0;
+                    if (priceMatch) {
+                        price = parseFloat(priceMatch[1].replace(/,/g, ''));
+                    }
+                    // Fallback: first RM price after the flight number
+                    if (price <= 0) {
+                        const fallback = block.match(/RM\\s*([\\d,]+\\.\\d{2})/);
+                        if (fallback) price = parseFloat(fallback[1].replace(/,/g, ''));
                     }
 
                     if (price <= 0) continue;
@@ -643,12 +625,9 @@ class BatikAirConnectorClient:
                     results.push({
                         flightNo: m.flightNo,
                         carrier: m.carrier,
-                        airline: m.airline,
-                        depTime: depTime,
-                        arrTime: arrTime,
-                        durationSec: durSec,
-                        stops: parseInt(stops) || 0,
-                        price: price,
+                        airline: m.airline || 'Batik Air',
+                        depTime, arrTime, durationSec: durSec,
+                        stops, price,
                         origin: params.origin,
                         destination: params.destination,
                     });
@@ -701,12 +680,12 @@ class BatikAirConnectorClient:
                 offers.append(FlightOffer(
                     id=f"id_{fid}",
                     price=float(price),
-                    currency="IDR",
-                    price_formatted=f"Rp {price:,.0f}",
+                    currency="MYR",
+                    price_formatted=f"RM {price:,.2f}",
                     outbound=route,
                     inbound=None,
                     airlines=[f.get("airline", "Batik Air")],
-                    owner_airline=f.get("carrier", "ID"),
+                    owner_airline=f.get("carrier", "OD"),
                     booking_url=booking_url,
                     is_locked=False,
                     source="batikair_direct",
@@ -782,8 +761,8 @@ class BatikAirConnectorClient:
             fid = hashlib.md5(f"id_{req.origin}{req.destination}{fno}{price}".encode()).hexdigest()[:12]
 
             offers.append(FlightOffer(
-                id=f"id_{fid}", price=round(price, 2), currency="IDR",
-                price_formatted=f"Rp {price:,.0f}", outbound=route, inbound=None,
+                id=f"id_{fid}", price=round(price, 2), currency="MYR",
+                price_formatted=f"RM {price:,.2f}", outbound=route, inbound=None,
                 airlines=["Batik Air"], owner_airline=carrier,
                 booking_url=booking_url, is_locked=False,
                 source="batikair_direct", source_tier="free",
@@ -824,7 +803,7 @@ class BatikAirConnectorClient:
         h = hashlib.md5(f"batikair{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
-            currency="IDR", offers=offers, total_results=len(offers),
+            currency="MYR", offers=offers, total_results=len(offers),
         )
 
     @staticmethod
@@ -836,5 +815,5 @@ class BatikAirConnectorClient:
         h = hashlib.md5(f"batikair{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
-            currency="IDR", offers=[], total_results=0,
+            currency="MYR", offers=[], total_results=0,
         )

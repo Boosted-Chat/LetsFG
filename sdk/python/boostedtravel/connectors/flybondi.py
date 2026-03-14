@@ -30,14 +30,14 @@ try:
 except ImportError:
     HAS_CURL = False
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from boostedtravel.connectors.browser import stealth_args
+from connectors.browser import stealth_args
 
 logger = logging.getLogger(__name__)
 
@@ -75,21 +75,9 @@ async def _get_browser():
     async with lock:
         if _browser and _browser.is_connected():
             return _browser
-        from playwright.async_api import async_playwright
-
-        _pw_instance = await async_playwright().start()
-        try:
-            _browser = await _pw_instance.chromium.launch(
-                headless=True,
-                channel="chrome",
-                args=["--disable-blink-features=AutomationControlled", *stealth_args()],
-            )
-        except Exception:
-            _browser = await _pw_instance.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox", *stealth_args()],
-            )
-        logger.info("Flybondi: Playwright browser launched (headed Chrome)")
+        from connectors.browser import launch_headed_browser
+        _browser = await launch_headed_browser()
+        logger.info("Flybondi: browser launched")
         return _browser
 
 

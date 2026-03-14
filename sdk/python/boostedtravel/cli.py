@@ -1,9 +1,12 @@
 """
 BoostedTravel CLI — Agent-native flight search & booking from terminal.
 
-Usage:
+Usage (local — free, no API key):
+    boostedtravel search-local GDN BER 2026-03-03
+    boostedtravel search-local LON BCN 2026-04-01 --return 2026-04-08 --sort price
+
+Usage (API — requires key):
     boostedtravel search GDN BER 2026-03-03
-    boostedtravel search LON BCN 2026-04-01 --return 2026-04-08 --sort price
     boostedtravel unlock off_xxx
     boostedtravel book off_xxx --passenger '{"id":"pas_xxx","given_name":"John",...}'
     boostedtravel register --name my-agent --email agent@example.com
@@ -35,7 +38,8 @@ app = typer.Typer(
         "BoostedTravel — Agent-native flight search & booking.\n\n"
         "Search 400+ airlines at raw airline prices — $20-50 cheaper than OTAs.\n"
         "Search is FREE. Unlock: $1. Book: FREE after unlock.\n\n"
-        "Set BOOSTEDTRAVEL_API_KEY or use --api-key."
+        "Local search (no API key): boostedtravel search-local GDN BCN 2026-06-15\n"
+        "Full search (API key):     boostedtravel search GDN BCN 2026-06-15"
     ),
     no_args_is_help=True,
 )
@@ -166,6 +170,102 @@ def search(
 
     print(f"\n  To unlock: boostedtravel unlock <offer_id>")
     print(f"  Passenger IDs needed for booking: {result.passenger_ids}\n")
+
+
+# ── Search Local ───────────────────────────────────────────────────────────
+
+@app.command("search-local")
+def search_local_cmd(
+    origin: str = typer.Argument(..., help="Departure IATA code (e.g., GDN, LON, JFK)"),
+    destination: str = typer.Argument(..., help="Arrival IATA code (e.g., BER, BCN, LAX)"),
+    date: str = typer.Argument(..., help="Departure date YYYY-MM-DD"),
+    return_date: Optional[str] = typer.Option(None, "--return", "-r", help="Return date for round-trip"),
+    adults: int = typer.Option(1, "--adults", "-a", help="Number of adults"),
+    children: int = typer.Option(0, "--children", help="Number of children"),
+    cabin: Optional[str] = typer.Option(None, "--cabin", "-c", help="M=economy W=premium C=business F=first"),
+    currency: str = typer.Option("EUR", "--currency", help="Currency code"),
+    limit: int = typer.Option(20, "--limit", "-l", help="Max results"),
+    sort: str = typer.Option("price", "--sort", help="Sort: price or duration"),
+    output_json: bool = typer.Option(False, "--json", "-j", help="Output raw JSON"),
+):
+    """Search flights locally — FREE, no API key. Runs 58 airline connectors on your machine."""
+    import asyncio
+    import warnings
+    from boostedtravel.local import search_local
+
+    # Suppress asyncio transport warnings from Playwright subprocess cleanup
+    warnings.filterwarnings("ignore", category=ResourceWarning, message=".*unclosed transport.*")
+
+    try:
+        result = asyncio.run(search_local(
+            origin=origin,
+            destination=destination,
+            date_from=date,
+            return_date=return_date,
+            adults=adults,
+            children=children,
+            cabin_class=cabin,
+            currency=currency,
+            limit=limit,
+        ))
+    except Exception as e:
+        _err(f"Local search failed: {e}")
+
+    offers = result.get("offers", [])
+    total = result.get("total_results", len(offers))
+
+    # Sort
+    if sort == "price":
+        offers.sort(key=lambda o: o.get("price", float("inf")))
+    elif sort == "duration":
+        offers.sort(key=lambda o: (o.get("outbound", {}).get("total_duration_seconds") or float("inf")))
+
+    offers = offers[:limit]
+
+    if output_json:
+        _json_out({"total_results": total, "offers": offers})
+        return
+
+    if not offers:
+        print(f"No flights found for {origin} → {destination} on {date}")
+        return
+
+    print(f"\n  {total} offers  |  {origin} → {destination}  |  {date}  |  LOCAL search")
+
+    if HAS_RICH:
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("#", style="dim", width=4)
+        table.add_column("Price", justify="right", style="green")
+        table.add_column("Airline")
+        table.add_column("Route")
+        table.add_column("Duration", justify="right")
+        table.add_column("Stops", justify="center")
+
+        for i, o in enumerate(offers, 1):
+            ob = o.get("outbound", {})
+            route = ob.get("route_str", "")
+            airlines = o.get("owner_airline") or ",".join(o.get("airlines", []))
+            dur_s = ob.get("total_duration_seconds")
+            if dur_s:
+                h, m = divmod(dur_s // 60, 60)
+                dur = f"{h}h {m:02d}m"
+            else:
+                dur = "-"
+            stops = str(ob.get("stopovers", 0))
+            price = o.get("price", 0)
+            cur = o.get("currency", currency)
+            table.add_row(str(i), f"{cur} {price:.2f}", airlines, route, dur, stops)
+        console.print(table)
+    else:
+        for i, o in enumerate(offers, 1):
+            price = o.get("price", 0)
+            cur = o.get("currency", currency)
+            airlines = o.get("owner_airline") or ",".join(o.get("airlines", []))
+            ob = o.get("outbound", {})
+            route = ob.get("route_str", "")
+            print(f"  {i:3d}. {cur} {price:.2f}  {airlines}  {route}")
+
+    print()
 
 
 # ── Unlock ────────────────────────────────────────────────────────────────

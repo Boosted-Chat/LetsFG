@@ -25,7 +25,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from boostedtravel.models.flights import (
+from models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -96,7 +96,7 @@ async def _get_browser():
         if _browser and _browser.is_connected():
             return _browser
 
-        from boostedtravel.connectors.browser import find_chrome
+        from connectors.browser import find_chrome
 
         chrome = find_chrome()
         user_data = os.path.join(
@@ -370,4 +370,3 @@ class PorterConnectorClient:
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
             currency=req.currency, offers=[], total_results=0,
         )
-
