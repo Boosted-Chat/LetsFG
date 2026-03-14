@@ -131,6 +131,25 @@
 | 52 | biman | BG | API | `done` | | | Biman Bangladesh Airlines. Pure httpx — Sabre DX GraphQL API at booking.biman-airlines.com/api/graphql with x-sabre-storefront: BGDX header. No browser/session/cookies needed. DAC hub → AE/SA/QA/KW/OM/IN/NP/TH/MY/SG/HK/CN/IT/GB/CA/PK. |
 | 53 | gulfair | GF | — | `blocked` | | | Gulf Air. flights.gulfair.com protected by GeeTest CAPTCHA (visual puzzle). Angular SPA behind gt.js challenge. No usable direct API found. BAH hub → IN/BD/ME/EU. |
 
+### Middle East & Global Premium Carriers (14)
+
+| # | Connector | IATA | Type | Status | Claimed by | Timestamp | Notes |
+|---|-----------|------|------|--------|------------|-----------|-------|
+| 54 | emirates | EK | — | `broken` | | | Emirates. World's largest intl airline by RPK. DXB hub → 150+ destinations, 6 continents. emirates.com. |
+| 55 | qatar | QR | — | `broken` | | | Qatar Airways. DOH hub, Skytrax best airline. 170+ destinations. qatarairways.com — Amadeus booking engine. |
+| 56 | etihad | EY | — | `broken` | | | Etihad Airways. AUH hub → 70+ destinations. etihad.com — heavy JS SPA. |
+| 57 | saudia | SV | — | `broken` | | | Saudia (Saudi Arabian Airlines). JED/RUH hubs → 100+ destinations. Hajj/Umrah traffic + regional. saudia.com. |
+| 58 | omanair | WY | — | `broken` | | | Oman Air. MCT hub → 50+ destinations (complements SalamAir). book.omanair.com — Incapsula protected. |
+| 59 | kuwaitairways | KU | — | `broken` | | | Kuwait Airways. KWI hub → 50+ destinations. kuwaitairways.com. |
+| 60 | royaljordanian | RJ | — | `broken` | | | Royal Jordanian. AMM hub → Levant/EU/US connectivity. rj.com. |
+| 61 | turkish | TK | — | `broken` | | | Turkish Airlines. IST hub, largest network by destination count (340+). turkishairlines.com. |
+| 62 | singapore | SQ | — | `broken` | | | Singapore Airlines. SIN hub, premium Asia-Pacific carrier. singaporeair.com. |
+| 63 | cathay | CX | — | `broken` | | | Cathay Pacific. HKG hub → Asia/EU/NA/AU. cathaypacific.com. |
+| 64 | thai | TG | — | `broken` | | | Thai Airways. BKK hub → Asia/EU/AU. thaiairways.com. |
+| 65 | ana | NH | — | `broken` | | | ANA (All Nippon Airways). NRT/HND hubs → Asia/EU/NA. ana.co.jp. |
+| 66 | korean | KE | — | `broken` | | | Korean Air. ICN hub → Asia/EU/NA/AU. koreanair.com. |
+| 67 | malaysia | MH | — | `broken` | | | Malaysia Airlines. KUL hub → Asia/EU/AU. malaysiaairlines.com. |
+
 ---
 
 ## How to Claim a Connector
