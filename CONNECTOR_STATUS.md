@@ -128,8 +128,8 @@
 |---|-----------|------|------|--------|------------|-----------|-------|
 | 50 | salamair | OV | API | `done` | claude-connector-builder | 2026-03-14T12:00Z | Pure httpx, api.salamair.com REST API. MCT hub → IN/BD/ME/AF. Tested MCT→SLL (8 offers 48.99 OMR), MCT→BOM (4 offers 124.94 OMR), MCT→DAC (4 offers 66.99 OMR), MCT→CGP (4 offers 132.40 OMR). |
 | 51 | usbangla | BS | Browser | `done` | | | US-Bangla Airlines. Playwright form flow → Zenith FrontOffice DOM scraping. DAC hub → AE/OM/QA/SA/IN/MY/SG/TH/CN/MV/NP/DE/GB/US. |
-| 52 | biman | BG | TBD | `broken` | | | Biman Bangladesh Airlines. bimanair.com returns 200, biman-airlines.com returns 403 (CloudFlare). DAC hub → ME/EU/AS. |
-| 53 | gulfair | GF | TBD | `blocked` | | | Gulf Air. flights.gulfair.com protected by GeeTest CAPTCHA. BAH hub → IN/BD/ME/EU. Likely blocked. |
+| 52 | biman | BG | API | `done` | | | Biman Bangladesh Airlines. Pure httpx — Sabre DX GraphQL API at booking.biman-airlines.com/api/graphql with x-sabre-storefront: BGDX header. No browser/session/cookies needed. DAC hub → AE/SA/QA/KW/OM/IN/NP/TH/MY/SG/HK/CN/IT/GB/CA/PK. |
+| 53 | gulfair | GF | — | `blocked` | | | Gulf Air. flights.gulfair.com protected by GeeTest CAPTCHA (visual puzzle). Angular SPA behind gt.js challenge. No usable direct API found. BAH hub → IN/BD/ME/EU. |
 
 ---
 

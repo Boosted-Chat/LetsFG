@@ -83,6 +83,8 @@ from connectors.nineair import NineAirConnectorClient
 from connectors.avelo import AveloConnectorClient
 from connectors.breeze import BreezeConnectorClient
 from connectors.salamair import SalamAirConnectorClient
+from connectors.usbangla import USBanglaConnectorClient
+from connectors.biman import BimanConnectorClient
 
 from models.flights import AirlineSummary, FlightOffer, FlightSearchRequest, FlightSearchResponse
 
@@ -101,6 +103,7 @@ _BROWSER_SOURCES: set[str] = {
     "porter_direct", "scoot_direct", "smartwings_direct", "southwest_direct",
     "spirit_direct", "sunexpress_direct", "transavia_direct", "twayair_direct",
     "vietjet_direct", "volaris_direct", "volotea_direct", "vueling_direct",
+    "usbangla_direct",
     "zipair_direct",
 }
 
@@ -156,6 +159,8 @@ _DIRECT_AIRLINE_connectorS: list[tuple[str, type, float]] = [
     ("avelo_direct", AveloConnectorClient, 45.0),
     ("breeze_direct", BreezeConnectorClient, 45.0),
     ("salamair_direct", SalamAirConnectorClient, 20.0),
+    ("usbangla_direct", USBanglaConnectorClient, 45.0),
+    ("biman_direct", BimanConnectorClient, 25.0),
 ]
 
 

@@ -332,6 +332,10 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
         "GE", "TR", "GB", "AT", "CZ", "BA", "RS",
     },
     "airindiaexpress": {"IN", "AE", "SA", "QA", "KW", "OM", "BH", "MY", "SG", "TH"},
+    "usbangla": {
+        "BD", "AE", "OM", "QA", "SA", "IN", "MY", "SG", "TH", "CN",
+        "MV", "NP", "DE", "GB", "US",
+    },
     "flysafair": {"ZA"},
     "airpeace": {"NG", "GH", "ZA", "KE", "AE", "GB"},
 }
