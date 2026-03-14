@@ -114,7 +114,7 @@
 | 40 | jetblue | B6 | LCC | `done` | bestFares calendar API (no auth, ~2s), Playwright fallback for details. 114+ destinations. |
 | 41 | breeze | MX | LCC | `done` | Playwright API interception (Navitaire NewSkies GraphQL). 75+ US routes. flybreeze.com. |
 | 42 | avelo | XP | ULCC | `done` | Playwright deep-link scraper. 42 US domestic routes. Deep link URL bypasses form fill. Blazor WASM app. |
-| 43 | suncountry | SY | ULCC | `broken` | **US IP required.** 81+ destinations from MSP hub, best low-cost carrier NA. suncountry.com. |
+| 43 | suncountry | SY | ULCC | `ok` | Lowfare API via Playwright (availability/search endpoint is unreachable). 81+ destinations from MSP hub. suncountry.com. |
 | 44 | alaska | AS | Major | `broken` | **US IP required.** West Coast dominant + Hawaii monopoly (post-Hawaiian merger). alaskaair.com. |
 | 45 | hawaiian | HA | Major | `broken` | **US IP required.** Hawaii inter-island + mainland-Hawaii + Asia/Pacific. hawaiianairlines.com. |
 | 46 | american | AA | Major | `broken` | **US IP required.** Largest airline worldwide, every US city pair. aa.com — complex SPA. |
@@ -137,7 +137,7 @@
 |---|-----------|------|------|--------|------------|-----------|-------|
 | 54 | emirates | EK | — | `broken` | | | Emirates. World's largest intl airline by RPK. DXB hub → 150+ destinations, 6 continents. emirates.com. |
 | 55 | qatar | QR | — | `broken` | | | Qatar Airways. DOH hub, Skytrax best airline. 170+ destinations. qatarairways.com — Amadeus booking engine. |
-| 56 | etihad | EY | — | `broken` | | | Etihad Airways. AUH hub → 70+ destinations. etihad.com — heavy JS SPA. |
+| 56 | etihad | EY | `etihad.py` | `done` | | CDP Chrome + form fill + calendar pricing API interception | Etihad Airways. AUH hub → 70+ destinations. Calendar pricing via ada-services/bff-calendar-pricing. |
 | 57 | saudia | SV | — | `broken` | | | Saudia (Saudi Arabian Airlines). JED/RUH hubs → 100+ destinations. Hajj/Umrah traffic + regional. saudia.com. |
 | 58 | omanair | WY | — | `broken` | | | Oman Air. MCT hub → 50+ destinations (complements SalamAir). book.omanair.com — Incapsula protected. |
 | 59 | kuwaitairways | KU | — | `broken` | | | Kuwait Airways. KWI hub → 50+ destinations. kuwaitairways.com. |

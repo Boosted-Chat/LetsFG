@@ -85,6 +85,8 @@ from connectors.breeze import BreezeConnectorClient
 from connectors.salamair import SalamAirConnectorClient
 from connectors.usbangla import USBanglaConnectorClient
 from connectors.biman import BimanConnectorClient
+from connectors.etihad import EtihadConnectorClient
+from connectors.suncountry import SunCountryConnectorClient
 
 from models.flights import AirlineSummary, FlightOffer, FlightSearchRequest, FlightSearchResponse
 
@@ -104,7 +106,9 @@ _BROWSER_SOURCES: set[str] = {
     "spirit_direct", "sunexpress_direct", "transavia_direct", "twayair_direct",
     "vietjet_direct", "volaris_direct", "volotea_direct", "vueling_direct",
     "usbangla_direct",
+    "etihad_direct",
     "zipair_direct",
+    "suncountry_direct",
 }
 
 # Registry of direct airline connectors: (source_name, connector_class, timeout)
@@ -161,6 +165,8 @@ _DIRECT_AIRLINE_connectorS: list[tuple[str, type, float]] = [
     ("salamair_direct", SalamAirConnectorClient, 20.0),
     ("usbangla_direct", USBanglaConnectorClient, 45.0),
     ("biman_direct", BimanConnectorClient, 25.0),
+    ("etihad_direct", EtihadConnectorClient, 35.0),
+    ("suncountry_direct", SunCountryConnectorClient, 45.0),
 ]
 
 
