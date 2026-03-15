@@ -121,6 +121,12 @@ _CONNECTOR_DEFS: list[tuple[str, str, str, float]] = [
     ("thai_direct", "connectors.thai", "ThaiConnectorClient", 25.0),
     ("korean_direct", "connectors.korean", "KoreanConnectorClient", 45.0),
     ("nh_direct", "connectors.nh", "ANAConnectorClient", 60.0),
+    ("qatar_direct", "connectors.qatar", "QatarConnectorClient", 55.0),
+    ("westjet_direct", "connectors.westjet", "WestjetConnectorClient", 45.0),
+    ("latam_direct", "connectors.latam", "LatamConnectorClient", 50.0),
+    ("copa_direct", "connectors.copa", "CopaConnectorClient", 45.0),
+    ("avianca_direct", "connectors.avianca", "AviancaConnectorClient", 45.0),
+    ("lot_direct", "connectors.lot", "LotConnectorClient", 45.0),
 ]
 
 # Build the registry dynamically — skip connectors whose deps are missing.
@@ -166,6 +172,12 @@ _BROWSER_SOURCES: set[str] = {
     "singapore_direct",
     "korean_direct",
     "nh_direct",
+    "qatar_direct",
+    "westjet_direct",
+    "latam_direct",
+    "copa_direct",
+    "avianca_direct",
+    "lot_direct",
 }
 
 

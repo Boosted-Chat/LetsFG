@@ -537,6 +537,49 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
         "ZA", "KE",
     },
     "suncountry": {"US", "MX", "JM", "BZ", "CR", "DO"},
+    "qatar": {
+        "QA", "AE", "SA", "KW", "BH", "OM", "EG", "JO", "LB", "IQ", "IR",
+        "PK", "IN", "LK", "BD", "NP", "MV",
+        "TH", "MY", "SG", "ID", "PH", "VN", "KH", "MM",
+        "CN", "HK", "JP", "KR", "TW", "AU", "NZ",
+        "GB", "IE", "FR", "DE", "IT", "ES", "PT", "CH", "NL", "BE",
+        "AT", "SE", "NO", "DK", "FI", "PL", "CZ", "HU", "RO", "BG",
+        "GR", "CY", "TR", "RU",
+        "US", "CA", "BR", "AR", "CL", "MX",
+        "KE", "TZ", "ZA", "NG", "ET", "GH", "UG", "MU", "SC",
+        "KZ", "UZ", "AZ", "GE",
+    },
+    "westjet": {
+        "CA", "US", "MX", "GB", "IE", "FR", "DE", "IT", "ES",
+        "JM", "CU", "DO", "BB", "TC", "BS", "HT", "LC", "GD",
+        "CR", "BZ", "HN", "PA",
+        "JP",
+    },
+    "latam": {
+        "CL", "BR", "AR", "PE", "CO", "EC", "UY", "PY", "BO",
+        "US", "MX", "DO", "CU",
+        "GB", "FR", "DE", "IT", "ES", "NL",
+        "AU", "NZ",
+    },
+    "copa": {
+        "PA", "US", "CO", "BR", "AR", "CL", "PE", "EC", "MX",
+        "CR", "GT", "SV", "HN", "NI", "BZ",
+        "DO", "JM", "CU", "CW", "AW", "TT", "BB",
+        "VE", "GY", "SR", "PY", "UY", "BO",
+    },
+    "avianca": {
+        "CO", "SV", "GT", "CR", "EC", "PE", "HN", "NI",
+        "US", "MX", "BR", "AR", "CL", "DO", "CU",
+        "ES", "GB", "DE", "IT", "FR",
+    },
+    "lot": {
+        "PL", "GB", "DE", "FR", "IT", "ES", "NL", "BE", "CH", "AT",
+        "SE", "NO", "DK", "FI", "CZ", "HU", "RO", "BG", "HR", "RS",
+        "UA", "GR", "CY", "PT", "IE", "IS", "LT", "LV", "EE",
+        "US", "CA",
+        "TR", "IL", "EG", "AE", "SA", "KZ", "UZ", "GE",
+        "CN", "JP", "KR", "IN", "LK", "TH", "SG",
+    },
 }
 
 
