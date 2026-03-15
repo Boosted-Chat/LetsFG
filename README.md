@@ -11,8 +11,6 @@ Agent-native flight search & booking. 400+ airlines, 73 ready-to-run airline con
 
 <div align="center">
   <img src="assets/demo.gif" alt="Demo: BoostedTravel vs Default Agent Search" width="640">
-  <br>
-  <sup><a href="https://github.com/Boosted-Chat/BoostedTravel/blob/main/assets/demo.mp4">▶ Watch full video with audio</a></sup>
 </div>
 
 > Side-by-side comparison: default agent search (OpenClaw, Perplexity Computer) vs BoostedTravel CLI. Same query — BoostedTravel finds cheaper flights across 73 airlines in seconds.
