@@ -1,4 +1,4 @@
-# LFG \u2708\ufe0f
+# LetsFG ✈️
 
 > **Formerly BoostedTravel** — same project, new name. [letsfg.co](https://letsfg.co)
 
@@ -10,21 +10,21 @@ Agent-native flight search & booking. 400+ airlines, 75 ready-to-run airline con
 [![npm](https://img.shields.io/npm/v/boostedtravel?label=npm%20%28JS%20SDK%29)](https://www.npmjs.com/package/boostedtravel)
 [![Smithery](https://smithery.ai/badge/boostedtravel-mcp)](https://smithery.ai/server/boostedtravel-mcp)
 
-## Demo: LFG vs Default Agent Search
+## Demo: LetsFG vs Default Agent Search
 
 <div align="center">
-  <img src="assets/demo.gif" alt="Demo: LFG vs Default Agent Search" width="640">
+  <img src="assets/demo.gif" alt="Demo: LetsFG vs Default Agent Search" width="640">
 </div>
 
-> Side-by-side comparison: default agent search (OpenClaw, Perplexity Computer) vs LFG CLI. Same query — LFG finds cheaper flights across 75 airlines in seconds.
+> Side-by-side comparison: default agent search (OpenClaw, Perplexity Computer) vs LetsFG CLI. Same query — LetsFG finds cheaper flights across 75 airlines in seconds.
 
-## Why LFG?
+## Why LetsFG?
 
-Flight websites inflate prices with demand tracking, cookie-based pricing, and surge markup. The same flight is often **$20–$50 cheaper** through LFG — raw airline price, zero markup.
+Flight websites inflate prices with demand tracking, cookie-based pricing, and surge markup. The same flight is often **$20–$50 cheaper** through LetsFG — raw airline price, zero markup.
 
-LFG works by finding the best price across the entire internet. It fires 75 airline connectors in parallel, scanning carriers across Europe, Asia, Americas, Middle East, and Africa — then merges results with enterprise GDS/NDC sources (Amadeus, Duffel, Sabre, Travelport) that provide competitive pricing from 400+ carriers including premium airlines like Lufthansa, British Airways, and Emirates. The best price wins.
+LetsFG works by finding the best price across the entire internet. It fires 75 airline connectors in parallel, scanning carriers across Europe, Asia, Americas, Middle East, and Africa — then merges results with enterprise GDS/NDC sources (Amadeus, Duffel, Sabre, Travelport) that provide competitive pricing from 400+ carriers including premium airlines like Lufthansa, British Airways, and Emirates. The best price wins.
 
-| | Google Flights / Booking.com / Expedia | **LFG** |
+| | Google Flights / Booking.com / Expedia | **LetsFG** |
 |---|---|---|
 | Search | Free | **Free** |
 | View details & price | Free (with tracking/inflation) | **Free** (no tracking) |
@@ -50,7 +50,7 @@ This runs 75 airline connectors locally on your machine and returns real-time pr
 
 ---
 
-## Two Ways to Use LFG
+## Two Ways to Use LetsFG
 
 ### Option A: Local Only (Free, No API Key)
 
@@ -77,7 +77,7 @@ for offer in result.offers[:5]:
 
 ### Option B: With API Key (Recommended — Much Better Coverage)
 
-One extra command unlocks the full power of LFG:
+One extra command unlocks the full power of LetsFG:
 
 ```bash
 pip install boostedtravel
@@ -89,7 +89,7 @@ boostedtravel search LHR JFK 2026-04-15
 ```
 
 **What you get (in addition to everything in Option A):**
-- **Enterprise GDS/NDC providers** — Amadeus, Duffel, Sabre, Travelport, Kiwi. These are contract-only data sources that normally require enterprise agreements worth $50k+/year. LFG is contracted with these providers and makes their inventory available to every user.
+- **Enterprise GDS/NDC providers** — Amadeus, Duffel, Sabre, Travelport, Kiwi. These are contract-only data sources that normally require enterprise agreements worth $50k+/year. LetsFG is contracted with these providers and makes their inventory available to every user.
 - **400+ full-service airlines** — Lufthansa, British Airways, Emirates, Singapore Airlines, ANA, Cathay Pacific, and hundreds more that don't have public APIs
 - **Competitive pricing** — the backend aggregates offers from multiple GDS sources and picks the cheapest for each route
 - **Unlock & book** — confirm live prices ($1) and create real airline PNRs with e-tickets
@@ -238,7 +238,7 @@ The combo engine builds cross-airline round-trips by combining one-way fares fro
 
 ### City-Wide Airport Expansion
 
-Search a city code and LFG automatically searches all airports in that city. `LON` expands to LHR, LGW, STN, LTN, SEN, LCY. `NYC` expands to JFK, EWR, LGA. Works for 25+ major cities worldwide — one search covers every airport.
+Search a city code and LetsFG automatically searches all airports in that city. `LON` expands to LHR, LGW, STN, LTN, SEN, LCY. `NYC` expands to JFK, EWR, LGA. Works for 25+ major cities worldwide — one search covers every airport.
 
 ## Architecture
 
@@ -314,7 +314,7 @@ All browser-based connectors share a common launcher (`connectors/browser.py`) w
 
 ### Performance Tuning
 
-LFG auto-detects your system's available RAM and scales browser concurrency accordingly:
+LetsFG auto-detects your system's available RAM and scales browser concurrency accordingly:
 
 | System RAM | Tier | Max Browsers | Notes |
 |-----------|------|-------------|-------|
