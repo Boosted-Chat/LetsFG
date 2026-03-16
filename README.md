@@ -1,6 +1,17 @@
+<table>
+<tr>
+<td width="140">
+<img src="assets/logo.png" alt="LetsFG" width="120">
+</td>
+<td>
+
 # LetsFG🔥🚀✈️ — agent-native travel search.
 
 ### Flights & hotels $50 cheaper in 5 seconds. Native to AI agents.
+
+</td>
+</tr>
+</table>
 
 LetsFG finds the cheapest flights across the entire internet — 75 airline connectors firing in parallel + enterprise GDS sources (Amadeus, Duffel, Sabre, Travelport) — and returns results in ~5 seconds. No web scraping wait times, no browser tabs, no inflated prices. Just raw airline prices, zero markup.
 
@@ -57,10 +68,6 @@ This runs 75 airline connectors locally on your machine and returns real-time pr
 ---
 
 ## Star History
-
-<div align="center">
-  <img src="assets/logo.png" alt="LetsFG" width="200">
-</div>
 
 <a href="https://star-history.com/#LetsFG/LetsFG&Date">
   <picture>
