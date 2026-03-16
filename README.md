@@ -8,7 +8,7 @@ Native to **OpenClaw**, **Perplexity Computer**, **Manus**, **Claude Code**, **C
 
 > ⭐ **Free forever for the first 1,000 stargazers.** Star this repo → register → get unlimited access. No credit card, no trial, no catch. Once 1,000 people have starred, this offer closes permanently.
 
-[![GitHub stars](https://img.shields.io/github/stars/Boosted-Chat/LetsFG?style=social)](https://github.com/Boosted-Chat/LetsFG)
+[![GitHub stars](https://img.shields.io/github/stars/LetsFG/LetsFG?style=social)](https://github.com/LetsFG/LetsFG)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/boostedtravel)](https://pypi.org/project/boostedtravel/)
 [![npm](https://img.shields.io/npm/v/boostedtravel-mcp?label=npm%20%28MCP%29)](https://www.npmjs.com/package/boostedtravel-mcp)
@@ -53,6 +53,22 @@ boostedtravel search-local GDN BCN 2026-06-15
 ```
 
 This runs 75 airline connectors locally on your machine and returns real-time prices. Completely free, unlimited, zero setup.
+
+---
+
+## Star History
+
+<div align="center">
+  <img src="assets/logo.png" alt="LetsFG" width="200">
+</div>
+
+<a href="https://star-history.com/#LetsFG/LetsFG&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=LetsFG/LetsFG&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=LetsFG/LetsFG&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=LetsFG/LetsFG&type=Date" />
+  </picture>
+</a>
 
 ---
 
@@ -402,16 +418,6 @@ configure_max_browsers(4)  # explicit override
 - **PyPI:** https://pypi.org/project/boostedtravel/
 - **npm (JS SDK):** https://www.npmjs.com/package/boostedtravel
 - **npm (MCP):** https://www.npmjs.com/package/boostedtravel-mcp
-
-## Star History
-
-<a href="https://star-history.com/#Boosted-Chat/LetsFG&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Boosted-Chat/LetsFG&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Boosted-Chat/LetsFG&type=Date" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Boosted-Chat/LetsFG&type=Date" />
-  </picture>
-</a>
 
 ## Contributing
 
