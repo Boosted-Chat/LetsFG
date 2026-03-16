@@ -47,7 +47,7 @@ from connectors.browser import find_chrome, stealth_popen_kwargs, _launched_proc
 
 logger = logging.getLogger(__name__)
 
-_DEBUG_PORT = 9455
+_DEBUG_PORT = 9457
 _USER_DATA_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), ".emirates_chrome_data"
 )

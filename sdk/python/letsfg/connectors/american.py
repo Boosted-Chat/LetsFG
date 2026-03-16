@@ -657,7 +657,13 @@ class AmericanConnectorClient:
                 source="american_direct",
                 source_tier="protocol",
                 is_locked=True,
-                booking_url="",
+                booking_url=(
+                    f"https://www.aa.com/booking/search?locale=en_US"
+                    f"&pax=1&adult=1&type=OneWay"
+                    f"&searchType=Revenue"
+                    f"&origin={req.origin}&destination={req.destination}"
+                    f"&departDate={req.date_from}"
+                ),
             )
 
         except Exception as e:

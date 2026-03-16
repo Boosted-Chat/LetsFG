@@ -850,7 +850,13 @@ class DeltaConnectorClient:
                 source="delta_direct",
                 source_tier="protocol",
                 is_locked=True,
-                booking_url="",
+                booking_url=(
+                    f"https://www.delta.com/flight-search/search-results"
+                    f"?tripType=ONE_WAY&action=findFlights"
+                    f"&originCity={req.origin}&destinationCity={req.destination}"
+                    f"&departureDate={req.date_from}"
+                    f"&paxCount=1&currencyCode={req.currency or 'USD'}"
+                ),
             )
         except Exception as e:
             logger.debug("Delta: failed to build offer: %s", e)
