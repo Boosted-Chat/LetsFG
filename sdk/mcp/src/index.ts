@@ -352,7 +352,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<st
     }
 
     case 'link_github': {
-      const result = await apiRequest('POST', '/api/v1/agents/link-github', { github_username: args.github_username });
+      const result = await apiRequest('POST', `/api/v1/agents/link-github?github_username=${encodeURIComponent(args.github_username as string)}`, {});
       return JSON.stringify(result, null, 2);
     }
 

@@ -572,7 +572,7 @@ export class LetsFG {
    */
   async linkGithub(githubUsername: string): Promise<Record<string, unknown>> {
     this.requireApiKey();
-    return this.post<Record<string, unknown>>('/api/v1/agents/link-github', { github_username: githubUsername });
+    return this.post<Record<string, unknown>>(`/api/v1/agents/link-github?github_username=${encodeURIComponent(githubUsername)}`, {});
   }
 
   /**

@@ -445,10 +445,8 @@ class LetsFG:
             Dict with verification status and message.
         """
         self._require_api_key()
-        return self._post(
-            "/api/v1/agents/link-github",
-            {"github_username": github_username},
-        )
+        qs = urlencode({"github_username": github_username})
+        return self._post(f"/api/v1/agents/link-github?{qs}", {})
 
     def unlock(self, offer_id: str) -> UnlockResult:
         """
