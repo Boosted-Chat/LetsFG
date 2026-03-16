@@ -1,4 +1,4 @@
-# LetsFG ✈️
+# LetsFG🔥🚀✈️
 
 ### Save $20–$50 on every flight. Search 400+ airlines in 10 seconds. Native to AI agents.
 
