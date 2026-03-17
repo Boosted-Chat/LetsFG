@@ -2,7 +2,7 @@ name: Update Star History Chart
 
 on:
   schedule:
-    - cron: '0 6 * * *'  # daily at 06:00 UTC
+    - cron: '0 */4 * * *'  # every 4 hours
   workflow_dispatch: {}
 
 permissions:
@@ -16,9 +16,9 @@ jobs:
 
       - name: Bump cache-bust parameter
         run: |
-          TODAY=$(date +%Y%m%d)
-          sed -i "s|star-history.com/svg?repos=LetsFG/LetsFG&type=Date&theme=dark&v=[0-9]*|star-history.com/svg?repos=LetsFG/LetsFG\&type=Date\&theme=dark\&v=${TODAY}|g" README.md
-          sed -i "s|star-history.com/svg?repos=LetsFG/LetsFG&type=Date&v=[0-9]*|star-history.com/svg?repos=LetsFG/LetsFG\&type=Date\&v=${TODAY}|g" README.md
+          NOW=$(date +%Y%m%d%H)
+          sed -i "s|star-history.com/svg?repos=LetsFG/LetsFG&type=Date&theme=dark&v=[0-9]*|star-history.com/svg?repos=LetsFG/LetsFG\&type=Date\&theme=dark\&v=${NOW}|g" README.md
+          sed -i "s|star-history.com/svg?repos=LetsFG/LetsFG&type=Date&v=[0-9]*|star-history.com/svg?repos=LetsFG/LetsFG\&type=Date\&v=${NOW}|g" README.md
 
       - name: Commit if changed
         run: |
