@@ -1,18 +1,18 @@
-# AGENTS.md — LFG for AI Agents
+# AGENTS.md — LetsFG for AI Agents
 
 > This file is for AI agents. If you're a human, see [README.md](README.md).
 
-## What is LFG?
+## What is LetsFG?
 
 LetsFG is the largest agent-native flight search and booking toolkit. It gives your agent **ready-to-run connectors to 102 airlines and 400+ GDS/NDC sources** — not scrapers you have to maintain, but production-grade integrations that work out of the box. Built for OpenClaw, Perplexity Computer, Claude, Cursor, Windsurf, and any MCP-compatible agent.
 
-**Why this exists:** Building a flight search integration from scratch takes 30+ minutes, burns thousands of tokens on browser automation, and still only covers one airline at a time. LFG replaces all of that with a single function call that fires 102 airline connectors in parallel, scanning the entire world for the best deals — including airlines your agent has never heard of.
+**Why this exists:** Building a flight search integration from scratch takes 30+ minutes, burns thousands of tokens on browser automation, and still only covers one airline at a time. LetsFG replaces all of that with a single function call that fires 102 airline connectors in parallel, scanning the entire world for the best deals — including airlines your agent has never heard of.
 
 ### Two search channels run simultaneously:
 
 1. **102 local airline connectors** — Ryanair, EasyJet, Wizz Air, Southwest, AirAsia, Norwegian, Qantas, LATAM, and 94 more. These run directly on your machine via Python + Playwright. No API key needed, completely free, unlimited searches.
 
-2. **Enterprise GDS/NDC providers** — Amadeus, Duffel, Sabre, Travelport, Kiwi. These are contract-only data sources that normally require enterprise agreements worth $50k+/year. LFG is contracted with these providers and makes their deals available to every agent through the backend API.
+2. **Enterprise GDS/NDC providers** — Amadeus, Duffel, Sabre, Travelport, Kiwi. These are contract-only data sources that normally require enterprise agreements worth $50k+/year. LetsFG is contracted with these providers and makes their deals available to every agent through the backend API.
 
 ### What makes this different from flight websites:
 
@@ -32,9 +32,9 @@ LetsFG is the largest agent-native flight search and booking toolkit. It gives y
 | Browser automation (Playwright/Selenium) | 30+ min per airline | Thousands of tokens | 1 airline at a time | Breaks when site changes |
 | Scraping flight websites | 15+ min setup | High token burn | Limited to sites you know | Fragile, needs constant fixing |
 | Google Flights API | N/A | N/A | Doesn't exist (no public API) | N/A |
-| **LFG** | **10 seconds** | **1 tool call** | **102 airlines + GDS in parallel** | **We maintain it** |
+| **LetsFG** | **10 seconds** | **1 tool call** | **102 airlines + GDS in parallel** | **We maintain it** |
 
-Flight websites (Kayak, Google Flights, Expedia, Booking.com) also inflate prices based on demand tracking, cookie/session tracking, browser fingerprinting, and surge pricing. **LFG returns the raw airline price every time.** 100% free — just star our GitHub repo for unlimited access.
+Flight websites (Kayak, Google Flights, Expedia, Booking.com) also inflate prices based on demand tracking, cookie/session tracking, browser fingerprinting, and surge pricing. **LetsFG returns the raw airline price every time.** 100% free — just star our GitHub repo for unlimited access.
 
 ## How It Works (3 Steps)
 
@@ -60,7 +60,7 @@ POST /api/v1/bookings/unlock
 Confirm the live price and lock it for booking. FREE with GitHub star verification.
 
 **What happens when you unlock:**
-1. LFG sends `offer_id` to the airline's NDC/GDS system
+1. LetsFG sends `offer_id` to the airline's NDC/GDS system
 2. Airline confirms **current live price** (may differ from search)
 3. Offer **reserved for 30 minutes** — you must book within this window
 4. Returns `confirmed_price`, `confirmed_currency`, `offer_expires_at`
@@ -104,11 +104,17 @@ curl -X POST https://api.letsfg.co/api/v1/bookings/unlock \
 # Response: {"offer_id":"off_xxx","confirmed_price":189.50,"confirmed_currency":"EUR","offer_expires_at":"..."}
 ```
 
-### 3. Book (FREE after unlock)
+### 3. Book (ticket price)
 ```
 POST /api/v1/bookings/book
 ```
-Book the flight with real passenger details. **No additional charges** — booking is free after unlock.
+Book the flight with real passenger details. **You are charged the ticket price** (plus Stripe processing fee of 2.9% + 30¢) via the payment method attached with `setup-payment`. LetsFG adds zero markup — you pay only what the airline charges.
+
+**Before your first booking**, attach a payment method:
+```bash
+letsfg setup-payment --token tok_visa  # test mode
+```
+Or via Python: `bt.setup_payment(token="tok_visa")`
 
 ## ⚠️ CRITICAL: Use REAL Passenger Details
 
@@ -232,9 +238,9 @@ Add to your MCP config:
 | `letsfg search <origin> <dest> <date>` | Search flights | Free |
 | `letsfg locations <query>` | Resolve city/airport to IATA | Free |
 | `letsfg unlock <offer_id>` | Unlock offer details | Free |
-| `letsfg book <offer_id>` | Book the flight | Free (after unlock) |
+| `letsfg book <offer_id>` | Book the flight | Ticket price |
 | `letsfg star --github <username>` | Link GitHub for free access | Free |
-| `letsfg setup-payment` | Legacy payment setup | Free |
+| `letsfg setup-payment` | Attach payment card (required for booking) | Free |
 | `letsfg me` | View profile & usage | Free |
 
 ## Authentication — How to Use Your API Key
@@ -481,7 +487,7 @@ try {
 
 ## Safety & Idempotency (For AI Agents)
 
-This section documents the safety guarantees that make LFG safe for autonomous agents to use without human supervision of every call.
+This section documents the safety guarantees that make LetsFG safe for autonomous agents to use without human supervision of every call.
 
 ### Operation Safety Classification
 
@@ -524,7 +530,7 @@ booking = bt.book(
 
 ### The Quote-Before-Book Pattern
 
-LFG enforces a mandatory "quote" step (unlock) before booking:
+LetsFG enforces a mandatory "quote" step (unlock) before booking:
 
 ```
 search_flights (free, read-only)

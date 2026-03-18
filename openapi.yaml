@@ -22,7 +22,7 @@ info:
     letsfg register --name my-agent --email you@example.com
     ```
   contact:
-    name: LFG Support
+    name: LetsFG Support
     email: contact@letsfg.co
     url: https://letsfg.co
   license:
@@ -42,7 +42,7 @@ components:
       type: apiKey
       in: header
       name: X-API-Key
-      description: "LFG API key (prefix: trav_)"
+      description: "LetsFG API key (prefix: trav_)"
 
   schemas:
     FlightSearchRequest:

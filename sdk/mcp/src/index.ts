@@ -83,7 +83,7 @@ const TOOLS = [
       'Multi-airport city expansion: automatically searches sibling airports (e.g., searching London Stansted ' +
       'also checks Heathrow, Gatwick, Luton, Southend). Works for 25+ major cities worldwide.\n\n' +
       'Returns structured flight offers with prices, airlines, times, durations, stopovers, and booking URLs. ' +
-      'Covers airlines across Europe, Asia, Americas, Middle East, and Africa — including carriers the user ' +
+      'Covers airlines across Europe, Asia, Americas, Middle East, Africa, and Oceania — including carriers the user ' +
       'may not know exist (e.g., Jazeera Airways, FlySafair, 9 Air, Flybondi).\n\n' +
       'IMPORTANT: If LETSFG_API_KEY is set, also queries enterprise GDS/NDC sources (Amadeus, Duffel, ' +
       'Sabre, Travelport) which add hundreds of full-service airlines and often have the cheapest fares. ' +
@@ -143,8 +143,10 @@ const TOOLS = [
   {
     name: 'book_flight',
     description:
-      'Book an unlocked flight — creates real airline reservation with PNR. FREE after unlock.\n\n' +
-      'FLOW: search_flights → unlock_flight_offer (quote) → book_flight\n' +
+      'Book an unlocked flight — creates real airline reservation with PNR. Charges ticket price via Stripe.\n\n' +
+      'PAYMENT REQUIRED: Your Stripe payment method (attached via setup_payment) will be charged the ticket price ' +
+      'plus Stripe processing fee (2.9% + 30¢). LetsFG adds zero markup — you pay only the raw airline price.\n\n' +
+      'FLOW: search_flights → unlock_flight_offer (quote) → setup_payment (once) → book_flight\n' +
       'Requirements: 1) Offer must be unlocked first 2) passenger_ids from search 3) Full passenger details\n\n' +
       'SAFETY: Always provide idempotency_key to prevent double-bookings if this call is retried. ' +
       'Use any unique string (e.g., UUID). If the same key is sent twice, returns the original booking.\n\n' +
@@ -183,8 +185,9 @@ const TOOLS = [
   {
     name: 'setup_payment',
     description:
-      "Legacy payment setup — no longer required. Use link_github instead for free unlimited access.\n\n" +
-      'Only needed if you want the old Stripe-based flow. For most users, star the GitHub repo and call link_github.',
+      "Attach a payment card — REQUIRED before booking Duffel/GDS flights.\n\n" +
+      'Your card is charged the ticket price when you call book_flight. Attaching the card itself is free.\n' +
+      'Use tok_visa for testing (Stripe test mode). Only needs to be called once — card stays on file.',
     inputSchema: {
       type: 'object',
       properties: {

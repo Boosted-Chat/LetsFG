@@ -3,7 +3,7 @@ hide:
   - toc
 ---
 
-# LFG
+# LetsFG
 
 **Flight search & booking for AI agents and developers.**
 400+ airlines, 102 direct airline connectors, virtual interlining — straight from the terminal.

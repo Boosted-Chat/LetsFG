@@ -184,16 +184,16 @@ To avoid unexpected updates:
 | `search_flights` | Search 400+ airlines worldwide | FREE | None (read-only) |
 | `resolve_location` | City name → IATA code | FREE | None (read-only) |
 | `unlock_flight_offer` | Confirm live price, reserve 30 min | — | Confirms price |
-| `book_flight` | Create real airline reservation (PNR) | FREE | Creates booking |
-| `setup_payment` | Attach payment card (once) | FREE | Updates payment |
+| `book_flight` | Create real airline reservation (PNR) | Ticket price | Creates booking |
+| `setup_payment` | Attach payment card (required for booking) | FREE | Updates payment |
 | `get_agent_profile` | Usage stats & payment status | FREE | None (read-only) |
 | `system_info` | System resources & concurrency tier | FREE | None (read-only) |
 
 ### Booking Flow
 
 ```
-search_flights  →  unlock_flight_offer  →  book_flight
-   (free)              (quote)              (free, creates PNR)
+search_flights  →  unlock_flight_offer  →  setup_payment (once)  →  book_flight
+   (free)              (quote)              (attach card)        (ticket price, creates PNR)
 ```
 
 1. `search_flights("LON", "BCN", "2026-06-15")` — returns offers with prices from 102 airlines

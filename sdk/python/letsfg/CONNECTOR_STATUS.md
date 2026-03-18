@@ -235,8 +235,8 @@ After fixing:
 ### Test script template
 ```python
 import sys, asyncio, logging
-sys.path.insert(0, r"c:\Users\Adam\Desktop\folder\BoostedTravel-public\sdk\python\letsfg")
-sys.path.insert(0, r"c:\Users\Adam\Desktop\folder\BoostedTravel-public")
+sys.path.insert(0, r"c:\Users\Adam\Desktop\folder\LetsFG\sdk\python\letsfg")
+sys.path.insert(0, r"c:\Users\Adam\Desktop\folder\LetsFG")
 logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s: %(message)s")
 from datetime import date
 from models.flights import FlightSearchRequest

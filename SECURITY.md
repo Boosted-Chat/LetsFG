@@ -45,7 +45,7 @@ We aim to acknowledge reports within 48 hours and provide a fix or mitigation wi
 ## API Security Model
 
 - **API keys** authenticate all requests. Keep your key secret.
-- **Stripe** handles all payment processing. LFG never stores card numbers.
+- **Stripe** handles all payment processing. LetsFG never stores card numbers.
 - **Passenger data** (names, emails) is passed directly to the airline for booking. We do not store passenger PII beyond the booking transaction.
 - **HTTPS only** — all API traffic is encrypted in transit.
 

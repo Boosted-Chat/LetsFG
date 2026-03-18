@@ -37,7 +37,7 @@ app = typer.Typer(
     help=(
         "LetsFG — Agent-native flight search & booking.\n\n"
         "Search 400+ airlines at raw airline prices — $20-50 cheaper than OTAs.\n"
-        "100% FREE — just star our GitHub repo for unlimited access.\n\n"
+        "Search is free. Booking charges the ticket price only (zero markup).\n\n"
         "Quick start: letsfg register → letsfg star --github <username> → letsfg search\n"
         "Local search (no API key): letsfg search-local GDN BCN 2026-06-15\n"
         "Full search (API key):     letsfg search GDN BCN 2026-06-15"
@@ -412,7 +412,7 @@ def book(
     api_key: Optional[str] = typer.Option(None, "--api-key", "-k", envvar="LETSFG_API_KEY"),
     base_url: Optional[str] = typer.Option(None, "--base-url", envvar="LETSFG_BASE_URL"),
 ):
-    """Book a flight — FREE after unlock. Creates real airline reservation."""
+    """Book a flight — charges ticket price via Stripe. Creates real airline reservation."""
     bt = _get_client(api_key, base_url)
 
     passengers = []
@@ -535,7 +535,7 @@ def setup_payment(
     api_key: Optional[str] = typer.Option(None, "--api-key", "-k", envvar="LETSFG_API_KEY"),
     base_url: Optional[str] = typer.Option(None, "--base-url", envvar="LETSFG_BASE_URL"),
 ):
-    """Set up payment method (legacy — use 'letsfg star' instead)."""
+    """Set up payment method (required before booking)."""
     bt = _get_client(api_key, base_url)
     try:
         result = bt.setup_payment(token=token)

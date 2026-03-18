@@ -3,7 +3,7 @@ name: letsfg
 description: "LetsFG — Agent-native flight search, hotel search, and booking API. 400+ airlines, zero markup, 20-50 USD cheaper than OTAs. letsfg.co"
 ---
 
-# SKILL.md — LFG Capabilities
+# SKILL.md — LetsFG Capabilities
 
 > Machine-readable skill manifest for AI agents and documentation indexers.
 ## Identity
@@ -86,11 +86,13 @@ Confirm live price with airline and reserve offer for 30 minutes. FREE with GitH
 - **JS/TS:** `const unlocked = await bt.unlock(offerId)`
 
 ### book_flight
-Create a real airline reservation with PNR code. FREE after unlock.
-- **Cost:** FREE
+Create a real airline reservation with PNR code. Charges ticket price via Stripe before booking.
+- **Cost:** Ticket price + Stripe processing fee (2.9% + 30¢). Zero markup — LetsFG does not add any margin.
+- **Prerequisite:** Payment method must be attached via `setup_payment` first.
 - **Input:** offer_id, passengers (id, given_name, family_name, born_on, gender, title, email, phone_number), contact_email
 - **Output:** booking_reference (airline PNR), status, flight_price, currency
 - **CRITICAL:** Use real passenger names (must match passport/ID) and real email (airline sends e-ticket there)
+- **Payment flow:** Your Stripe card is charged the ticket price → LetsFG books via the airline → you get the PNR. If the airline booking fails, you are automatically refunded.
 
 ### hotel_checkrate
 Confirm hotel rate before booking (required if rate_type=RECHECK).
@@ -123,10 +125,11 @@ Register a new AI agent.
 - **Output:** api_key (permanent credential)
 
 ### setup_payment
-Attach a payment card for booking (legacy — use link_github instead).
-- **Cost:** FREE
-- **Input:** token (e.g. "tok_visa") or payment_method_id or card details
+Attach a payment card for booking. **Required before booking Duffel/GDS flights.**
+- **Cost:** FREE (attaching the card is free; you are charged the ticket price when you book)
+- **Input:** token (e.g. "tok_visa" for testing) or payment_method_id or card details
 - **Output:** Payment status confirmation
+- **Note:** Must be called once before your first booking. The card stays on file for future bookings.
 
 ### get_agent_profile
 Get current agent's profile, usage stats, and payment status.
@@ -147,14 +150,15 @@ After registration, star the GitHub repo and link your account via `POST /api/v1
 
 ## Complete Workflow
 
-### Flight Booking (5 API calls)
+### Flight Booking (6 API calls)
 
 ```
 1. POST /api/v1/agents/register        → Get API key (once)
 2. POST /api/v1/agents/link-github     → Star repo + verify (once)
-3. POST /api/v1/flights/search         → Search flights (FREE)
-4. POST /api/v1/bookings/unlock        → Unlock offer (FREE)
-5. POST /api/v1/bookings/book          → Book flight (FREE)
+3. POST /api/v1/agents/setup-payment   → Attach payment card (once)
+4. POST /api/v1/flights/search         → Search flights (FREE)
+5. POST /api/v1/bookings/unlock        → Unlock offer (FREE)
+6. POST /api/v1/bookings/book          → Book flight (ticket price charged via Stripe)
 ```
 
 ### Hotel Booking (6 API calls)
@@ -258,8 +262,8 @@ LETSFG_API_KEY=trav_... letsfg-mcp
 | `resolve_location` | City name → IATA code | FREE |
 | `link_github` | Star repo for free access (once) | FREE |
 | `unlock_flight_offer` | Confirm price, reserve 30min | FREE |
-| `book_flight` | Create real airline reservation | FREE |
-| `setup_payment` | Legacy payment card (optional) | FREE |
+| `book_flight` | Create real airline reservation | Ticket price |
+| `setup_payment` | Attach payment card (required for booking) | FREE |
 | `get_agent_profile` | View usage stats | FREE |
 
 ## Search Flags Reference
@@ -354,7 +358,7 @@ def search_with_retry(bt, origin, dest, date, max_retries=3):
 | Setup payment | **Free** |
 | View profile | **Free** |
 | Unlock offer | **Free** |
-| Book flight (after unlock) | **Free** |
+| Book flight (after unlock) | **Ticket price** (zero markup, Stripe processing fee only) |
 | Hotel booking | Room price only |
 | Hotel cancellation | Per cancellation policy |
 

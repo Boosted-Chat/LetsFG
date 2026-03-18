@@ -1,6 +1,6 @@
 # Getting Started
 
-> 🎬 **[Watch the demo](https://github.com/LetsFG/LetsFG#demo-lfg-vs-default-agent-search)** — see LFG in action vs default agent search (OpenClaw, Perplexity Computer).
+> 🎬 **[Watch the demo](https://github.com/LetsFG/LetsFG#demo-lfg-vs-default-agent-search)** — see LetsFG in action vs default agent search (OpenClaw, Perplexity Computer).
 
 ## One-Click Install (No API Key Needed)
 
@@ -29,7 +29,7 @@ for offer in result.offers[:5]:
 
 ## Unlock Full Power with an API Key (Recommended)
 
-Adding an API key connects you to LFG's enterprise backend — GDS/NDC providers (Amadeus, Duffel, Sabre, Travelport, Kiwi) with 400+ premium carriers like Lufthansa, British Airways, Emirates, and Singapore Airlines. Both local connectors and cloud sources run simultaneously, giving you the best price from across the entire internet.
+Adding an API key connects you to LetsFG's enterprise backend — GDS/NDC providers (Amadeus, Duffel, Sabre, Travelport, Kiwi) with 400+ premium carriers like Lufthansa, British Airways, Emirates, and Singapore Airlines. Both local connectors and cloud sources run simultaneously, giving you the best price from across the entire internet.
 
 ### 1. Register (one command, free, instant)
 
@@ -191,7 +191,7 @@ If omitted, the search returns all cabin classes. Specify a cabin code to filter
 
 ## Performance Tuning
 
-LFG auto-detects system RAM and scales browser concurrency. This prevents Chrome from overwhelming low-end machines while maximizing throughput on powerful ones.
+LetsFG auto-detects system RAM and scales browser concurrency. This prevents Chrome from overwhelming low-end machines while maximizing throughput on powerful ones.
 
 | Available RAM | Tier | Max Browsers |
 |-------------|------|-------------|

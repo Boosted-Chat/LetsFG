@@ -2,7 +2,7 @@
 LetsFG Python SDK — agent-native flight search & booking.
 
 Zero-config, zero-browser, zero-markup. Built for autonomous agents.
-100% free — just star the GitHub repo.
+Search is free. Booking charges the ticket price via Stripe (zero markup).
 
     from letsfg import LetsFG
 
@@ -11,6 +11,9 @@ Zero-config, zero-browser, zero-markup. Built for autonomous agents.
     # Link GitHub (one-time — star the repo first)
     bt.link_github("myusername")
     
+    # Setup payment (one-time — required before booking)
+    bt.setup_payment(token="tok_visa")
+    
     # Search (FREE)
     flights = bt.search("LON", "BCN", "2026-04-01")
     print(flights.cheapest.summary())
@@ -18,7 +21,7 @@ Zero-config, zero-browser, zero-markup. Built for autonomous agents.
     # Unlock (FREE)
     unlock = bt.unlock(flights.cheapest.id)
     
-    # Book (FREE)
+    # Book (ticket price charged via Stripe)
     booking = bt.book(
         offer_id=flights.cheapest.id,
         passengers=[{
@@ -762,6 +765,6 @@ class LetsFG:
         return f"LetsFG(base_url={self.base_url!r}, api_key={masked!r})"
 
 
-# Backward-compat aliases
+# Backward-compat aliases (deprecated — use LetsFG / LetsFGError directly)
 BoostedTravel = LetsFG
 BoostedTravelError = LetsFGError

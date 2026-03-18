@@ -453,7 +453,7 @@ export class LetsFG {
   }
 
   /**
-   * Book a flight — FREE after unlock.
+   * Book a flight — charges ticket price via Stripe.
    * Creates a real airline reservation with PNR.
    *
    * Always provide idempotencyKey to prevent double-bookings on retry.
@@ -478,7 +478,7 @@ export class LetsFG {
   }
 
   /**
-   * Set up payment method (legacy — use linkGithub instead).
+   * Set up payment method (required before booking).
    */
   async setupPayment(token = 'tok_visa'): Promise<Record<string, unknown>> {
     this.requireApiKey();
@@ -712,7 +712,7 @@ export async function systemInfo(): Promise<Record<string, unknown>> {
 export default LetsFG;
 export { searchLocal as localSearch, systemInfo as getSystemInfo };
 
-// Backward-compat aliases
+// Backward-compat aliases (deprecated — use LetsFG / LetsFGError directly)
 export const BoostedTravel = LetsFG;
 export const BoostedTravelError = LetsFGError;
 export type BoostedTravelConfig = LetsFGConfig;

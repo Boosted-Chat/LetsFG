@@ -17,7 +17,7 @@ LetsFG finds the cheapest flights across the entire internet — 102 airline con
 
 Native to **OpenClaw**, **Perplexity Computer**, **Manus**, **Claude Code**, **Codex**, **Cursor**, **Windsurf** — any AI agent that supports CLI, MCP, or packages.
 
-> ⭐ **100% free. Just star this repo.** Star → register → get unlimited access forever. No credit card, no trial, no catch — the entire platform is free for the first 1,000 stargazers. Once 1,000 people have starred, this offer closes.
+> ⭐ **Search is free. Booking costs the ticket price only — zero markup.** Star → register → get unlimited search access forever. No trial, no catch. Booking charges the raw airline ticket price via Stripe (we add zero margin).
 
 [![GitHub stars](https://img.shields.io/github/stars/LetsFG/LetsFG?style=social)](https://github.com/LetsFG/LetsFG)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -38,13 +38,13 @@ Native to **OpenClaw**, **Perplexity Computer**, **Manus**, **Claude Code**, **C
 
 Flight websites inflate prices with demand tracking, cookie-based pricing, and surge markup. The same flight is often **$20–$50 cheaper** through LetsFG — raw airline price, zero markup.
 
-LetsFG works by finding the best price across the entire internet. It fires 102 airline connectors in parallel, scanning carriers across Europe, Asia, Americas, Middle East, and Africa — then merges results with enterprise GDS/NDC sources (Amadeus, Duffel, Sabre, Travelport) that provide competitive pricing from 400+ carriers including premium airlines like Lufthansa, British Airways, and Emirates. The best price wins.
+LetsFG works by finding the best price across the entire internet. It fires 102 airline connectors in parallel, scanning carriers across Europe, Asia, Americas, Middle East, Africa, and Oceania — then merges results with enterprise GDS/NDC sources (Amadeus, Duffel, Sabre, Travelport) that provide competitive pricing from 400+ carriers including premium airlines like Lufthansa, British Airways, and Emirates. The best price wins.
 
 | | Google Flights / Booking.com / Expedia | **LetsFG** |
 |---|---|---|
 | Search speed | 30s+ (loading, ads, redirects) | **~10 seconds** |
 | Search | Free (with tracking/inflation) | **Free** (no tracking, no cookies) |
-| Booking | Ticket + hidden markup | **Free** (raw airline price) |
+| Booking | Ticket + hidden markup | **Ticket price only** (raw airline price, zero markup) |
 | Price goes up on repeat search? | Yes (demand tracking) | **Never** |
 | LCC coverage | Missing many low-cost carriers | **102 direct airline connectors** |
 | Works inside AI agents? | No | **Native** (CLI, MCP, SDK) |
@@ -126,7 +126,7 @@ letsfg search LHR JFK 2026-04-15
 
 **Registration is instant, free, and handled by CLI** — an AI agent can do it in one command. The API key connects you to our closed-source backend service which maintains enterprise contracts with GDS/NDC providers and premium carriers.
 
-> ⭐ **Star this repo and register — that's it. Unlimited access, completely free, forever.** First 1,000 stars only.
+> ⭐ **Star this repo and register — unlimited search, zero-markup booking.** First 1,000 stars only.
 
 ```python
 from letsfg import LetsFG

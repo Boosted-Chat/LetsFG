@@ -1,8 +1,8 @@
-# Building AI Agents with LFG
+# Building AI Agents with LetsFG
 
 Guidelines for building autonomous AI agents that search, evaluate, and book flights. Works with OpenClaw, Perplexity Computer, Claude, Cursor, Windsurf, and any MCP-compatible agent framework.
 
-> 🎬 **[Watch the demo](https://github.com/LetsFG/LetsFG#demo-lfg-vs-default-agent-search)** — side-by-side comparison of default agent search vs LFG.
+> 🎬 **[Watch the demo](https://github.com/LetsFG/LetsFG#demo-lfg-vs-default-agent-search)** — side-by-side comparison of default agent search vs LetsFG.
 
 ## Two Search Modes
 
@@ -47,7 +47,7 @@ User request → Agent parses intent → Resolve locations → Search (free)
 
 6. **Use REAL passenger details.** Airlines send e-tickets to the contact email. Names must match the passenger's passport or government ID. Never use placeholder data.
 
-7. **Be aware of system resources.** Local search fires up to 102 browser-based connectors in parallel. LFG auto-scales concurrency based on available RAM, but agents can check resources and override:
+7. **Be aware of system resources.** Local search fires up to 102 browser-based connectors in parallel. LetsFG auto-scales concurrency based on available RAM, but agents can check resources and override:
 
 ```python
 from letsfg import get_system_profile, configure_max_browsers

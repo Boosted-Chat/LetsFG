@@ -42,8 +42,8 @@ __version__ = "1.0.1"
 __all__ = [
     "LetsFG",
     "LetsFGError",
-    "BoostedTravel",
-    "BoostedTravelError",
+    "BoostedTravel",      # deprecated alias
+    "BoostedTravelError", # deprecated alias,
     "AuthenticationError",
     "PaymentRequiredError",
     "OfferExpiredError",

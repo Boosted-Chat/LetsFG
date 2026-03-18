@@ -1,17 +1,17 @@
-# CLAUDE.md — LFG Codebase Context
+# CLAUDE.md — LetsFG Codebase Context
 
 > Instructions for Claude and other AI coding agents working on this repository.
 
 ## Project Overview
 
-LFG is an agent-native flight search & booking platform. This public repository contains the SDKs, 102 local airline connectors, and documentation. The backend API runs on Cloud Run and is in a separate private repository.
+LetsFG is an agent-native flight search & booking platform. This public repository contains the SDKs, 102 local airline connectors, and documentation. The backend API runs on Cloud Run and is in a separate private repository.
 
 **API Base URL:** `https://api.letsfg.co`
 
 ## Repository Structure
 
 ```
-LFG/
+LetsFG/
 ├── sdk/
 │   ├── python/                  # Python SDK → PyPI: letsfg
 │   │   ├── letsfg/
@@ -175,13 +175,13 @@ npm publish
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/v1/agents/register` | Register for an API key |
-| `POST` | `/api/v1/agents/setup-payment` | Legacy Stripe payment (optional) |
+| `POST` | `/api/v1/agents/setup-payment` | Attach Stripe payment method (required for booking) |
 | `GET`  | `/api/v1/agents/me` | Agent profile + usage stats |
 | `POST` | `/api/v1/agents/link-github` | Star repo for free access |
 | `POST` | `/api/v1/flights/search` | Search flights (cloud providers) |
 | `GET`  | `/api/v1/flights/locations/{q}` | Resolve city/airport to IATA codes |
 | `POST` | `/api/v1/bookings/unlock` | Unlock an offer (free) |
-| `POST` | `/api/v1/bookings/book` | Book a flight (free) |
+| `POST` | `/api/v1/bookings/book` | Book a flight (ticket price charged via Stripe) |
 | `GET`  | `/api/v1/bookings/booking/{id}` | Get booking details |
 | `GET`  | `/.well-known/ai-plugin.json` | OpenAI Plugin manifest |
 | `GET`  | `/.well-known/agent.json` | Agent Protocol manifest |

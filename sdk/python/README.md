@@ -85,7 +85,7 @@ print(f"{flights.total_results} offers, cheapest: {flights.cheapest.summary()}")
 unlock = bt.unlock(flights.cheapest.id)
 print(f"Confirmed price: {unlock.confirmed_currency} {unlock.confirmed_price}")
 
-# Book — FREE after unlock
+# Book — ticket price charged via Stripe (zero markup)
 booking = bt.book(
     offer_id=flights.cheapest.id,
     passengers=[{
@@ -345,7 +345,7 @@ letsfg locations "Berlin"
 | `search` | Search flights between any two airports | FREE |
 | `locations` | Resolve city name to IATA codes | FREE |
 | `unlock` | Unlock offer (confirms price, reserves 30min) | FREE |
-| `book` | Book flight (creates real airline PNR) | FREE |
+| `book` | Book flight (creates real airline PNR) | Ticket price |
 | `search-local` | Search 73 local airline connectors | FREE |
 | `system-info` | Show system resources & concurrency tier | FREE |
 | `register` | Register new agent, get API key | FREE |

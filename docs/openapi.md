@@ -1,6 +1,6 @@
 # OpenAPI Reference
 
-LFG provides a full OpenAPI 3.1 specification for the REST API.
+LetsFG provides a full OpenAPI 3.1 specification for the REST API.
 
 ## Interactive Documentation
 
@@ -25,7 +25,7 @@ You can import this spec into any OpenAPI-compatible tool (Postman, Insomnia, Sw
 | `/api/v1/flights/search` | POST | API key | Search 400+ airlines |
 | `/api/v1/flights/resolve-location` | GET | API key | Resolve city/airport to IATA codes |
 | `/api/v1/bookings/unlock` | POST | API key | Unlock offer (free) |
-| `/api/v1/bookings/book` | POST | API key | Book flight (free after unlock) |
+| `/api/v1/bookings/book` | POST | API key | Book flight (ticket price charged via Stripe) |
 
 **Base URL:** `https://api.letsfg.co`
 
@@ -42,7 +42,7 @@ curl -X POST https://api.letsfg.co/api/v1/flights/search \
 
 ## Agent Discovery
 
-LFG supports standard agent discovery protocols:
+LetsFG supports standard agent discovery protocols:
 
 | URL | Description |
 |-----|-------------|

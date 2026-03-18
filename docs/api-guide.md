@@ -2,7 +2,7 @@
 
 ## Two Ways to Search Flights
 
-LFG offers two search modes:
+LetsFG offers two search modes:
 
 | Mode | Command / Method | API Key | Coverage | Cost |
 |------|-----------------|---------|----------|------|
@@ -286,7 +286,7 @@ def search_and_book(origin_city, dest_city, date, passenger_info, email):
         print("Offer expired — search again")
         return None
 
-    # Step 4: Book (free after unlock)
+    # Step 4: Book (ticket price charged via Stripe)
     # Map passenger_info to each passenger_id from search
     passengers = []
     for i, pid in enumerate(flights.passenger_ids):
@@ -377,7 +377,7 @@ POST /api/v1/bookings/unlock
 
 ### What Happens When You Unlock
 
-1. LFG sends the `offer_id` to the airline's NDC/GDS system
+1. LetsFG sends the `offer_id` to the airline's NDC/GDS system
 2. The airline confirms the **current live price** (may differ slightly from search)
 3. The offer is **reserved for 30 minutes** — no one else can book it
 4. You receive `confirmed_price`, `confirmed_currency`, and `offer_expires_at`
@@ -513,5 +513,5 @@ booking = bt.book(offer_id=unlocked.offer_id, passengers=[...], contact_email=".
 | Resolve location | FREE | Unlimited |
 | View offer details | FREE | All details (price, airline, duration, conditions) returned in search |
 | Unlock | FREE | Confirms price, holds for 30 minutes |
-| Book | FREE | After unlock — creates real airline PNR |
+| Book | **Ticket price** | After unlock — charges ticket price via Stripe (zero markup) |
 | Re-search same route | FREE | Prices may change (real-time airline data) |
