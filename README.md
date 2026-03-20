@@ -23,6 +23,7 @@ Native to **OpenClaw**, **Perplexity Computer**, **Manus**, **Claude Code**, **C
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/letsfg)](https://pypi.org/project/letsfg/)
 [![npm](https://img.shields.io/npm/v/letsfg-mcp?label=npm%20%28MCP%29)](https://www.npmjs.com/package/letsfg-mcp)
+[![smithery badge](https://smithery.ai/badge/letsfg)](https://smithery.ai/servers/letsfg)
 [![npm](https://img.shields.io/npm/v/letsfg?label=npm%20%28JS%20SDK%29)](https://www.npmjs.com/package/letsfg)
 [![Smithery](https://smithery.ai/badge/letsfg-mcp)](https://smithery.ai/server/letsfg-mcp)
 
