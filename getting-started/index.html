@@ -1,0 +1,1779 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Agent-native flight search and booking API. Hundreds of airlines plus the major booking sites, per-flight reliability history, instant booking. No Playwright.">
+      
+      
+        <meta name="author" content="LetsFG">
+      
+      
+        <link rel="canonical" href="https://letsfg.co/developers/docs/getting-started/">
+      
+      
+        <link rel="prev" href="..">
+      
+      
+        <link rel="next" href="../api-guide/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Getting Started - LetsFG Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lexend:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Lexend";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/extra-20260519b.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#getting-started" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="LetsFG Docs" class="md-header__button md-logo" aria-label="LetsFG Docs" data-md-component="logo">
+      
+  <img src="../assets/lfg_ban.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            LetsFG Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Getting Started
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-hidden="true"  type="radio" name="__palette" id="__palette_0">
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/LetsFG/LetsFG" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    LetsFG/LetsFG
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="LetsFG Docs" class="md-nav__button md-logo" aria-label="LetsFG Docs" data-md-component="logo">
+      
+  <img src="../assets/lfg_ban.png" alt="logo">
+
+    </a>
+    LetsFG Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/LetsFG/LetsFG" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    LetsFG/LetsFG
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start Here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start Here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#agents-do-not-create-a-developer-api-account" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ⚠️ Agents: do not create a Developer API account
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#choose-the-right-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Choose the right mode
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#option-a-free-search-and-booking-with-a-card-backed-token" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Option A: Free search and booking with a card-backed token
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Option A: Free search and booking with a card-backed token">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-connect-once" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Connect once
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-search" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Search
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-book" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Book
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#option-b-public-developer-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Option B: Public developer API
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Option B: Public developer API">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-register-and-keep-the-api-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Register and keep the API key
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-connect-a-revolut-payment-method" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Connect a Revolut payment method
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-fund-prepaid-balance-optional" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Fund prepaid balance (optional)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-run-the-first-public-search" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Run the first public search
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-inspect-account-status" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Inspect account status
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#continue-with-the-paid-api-docs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Continue with the paid API docs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#common-mistakes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Common mistakes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#search-flags" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Search flags
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Public Developer API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Public Developer API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api-onboarding/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Onboarding & Billing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api-search/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Search & Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api-booking/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Booking Flights
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../hotels/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hotels
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api-errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors & Limits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI & Swagger
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP & IDE Agents
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    MCP & IDE Agents
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../packages/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Packages & SDKs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart-claude/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Desktop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart-cursor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cursor
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart-windsurf/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windsurf
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agent-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AI Agent Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorials/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorials
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture & Resilience
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../self-hosting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Self-Hosting & HTTP Endpoints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#agents-do-not-create-a-developer-api-account" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ⚠️ Agents: do not create a Developer API account
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#choose-the-right-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Choose the right mode
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#option-a-free-search-and-booking-with-a-card-backed-token" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Option A: Free search and booking with a card-backed token
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Option A: Free search and booking with a card-backed token">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-connect-once" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Connect once
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-search" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Search
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-book" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Book
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#option-b-public-developer-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Option B: Public developer API
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Option B: Public developer API">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-register-and-keep-the-api-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Register and keep the API key
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-connect-a-revolut-payment-method" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Connect a Revolut payment method
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-fund-prepaid-balance-optional" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Fund prepaid balance (optional)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-run-the-first-public-search" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Run the first public search
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-inspect-account-status" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Inspect account status
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#continue-with-the-paid-api-docs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Continue with the paid API docs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#common-mistakes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Common mistakes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#search-flags" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Search flags
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="getting-started">Getting Started<a class="headerlink" href="#getting-started" title="Permanent link">&para;</a></h1>
+<blockquote>
+<h3 id="agents-do-not-create-a-developer-api-account">⚠️ Agents: do not create a Developer API account<a class="headerlink" href="#agents-do-not-create-a-developer-api-account" title="Permanent link">&para;</a></h3>
+<p>Do <strong>NOT</strong> call <code>/developers/api/v1/agents/register</code> or
+<code>/developers/api/v1/agents/connect-payment</code>, and do <strong>NOT</strong> run
+<code>letsfg register</code> or <code>letsfg connect-payment</code>. Those belong to a separate,
+paid, prepaid-balance product for high-volume commercial integrations and
+create a billing account you almost certainly do not want.</p>
+<p>To search and book flights, connect LetsFG as an MCP server at
+<a href="https://letsfg.co/developers/api/mcp">https://letsfg.co/developers/api/mcp</a>. The consent step opens
+<a href="https://letsfg.co/connect">https://letsfg.co/connect</a>, where a card is saved (nothing is charged).
+See <a href="https://letsfg.co/for-agents">https://letsfg.co/for-agents</a>.</p>
+</blockquote>
+<div class="docs-callout">
+  <strong>Pick the correct path first.</strong> Use Option A (free Bearer token) if you want search and booking with no billing account. Use Option B (Developer API) if you want managed billing, hotels, or account-level controls.
+</div>
+
+<h2 id="choose-the-right-mode">Choose the right mode<a class="headerlink" href="#choose-the-right-mode" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Best for</th>
+<th>Setup</th>
+<th>Search cost</th>
+<th>Booking</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MCP / SDK (card-backed token)</td>
+<td>Agents, assistants, zero-cost search and booking</td>
+<td>Connect the MCP at <code>letsfg.co/developers/api/mcp</code>; consent saves a card at <code>letsfg.co/connect</code></td>
+<td>Free</td>
+<td><code>book_flight</code> / <code>POST /api/agent-book</code> — fare held on the card, captured against a real PNR</td>
+</tr>
+<tr>
+<td>Public Developer API</td>
+<td>Managed cloud search, products, teams, hotels</td>
+<td>Register, then connect a Revolut method (nothing charged)</td>
+<td>Look-to-book: 200 free after every booking, then $5.00 per 500</td>
+<td><code>POST /flights/book</code> — fare held on the connected method, captured against a real PNR. No booking fee, no transaction fee</td>
+</tr>
+<tr>
+<td>Hotels</td>
+<td>Booking a room, not a flight</td>
+<td>Developer API key + card on file</td>
+<td>Free search, card required</td>
+<td>5% at booking, balance via pay link</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Hotels work on the same credential.</strong> They accept either the card-backed PFS token or a
+Developer API key, and need a card on file — which the connect step already saves. See
+<a href="../hotels/">Hotels</a>.</p>
+<h2 id="option-a-free-search-and-booking-with-a-card-backed-token">Option A: Free search and booking with a card-backed token<a class="headerlink" href="#option-a-free-search-and-booking-with-a-card-backed-token" title="Permanent link">&para;</a></h2>
+<p>All search runs server-side at letsfg.co. No local browsers or Playwright required.</p>
+<h3 id="1-connect-once">1. Connect once<a class="headerlink" href="#1-connect-once" title="Permanent link">&para;</a></h3>
+<p>Connect LetsFG as an MCP server at <code>https://letsfg.co/developers/api/mcp</code> and approve the connection. The consent step opens <a href="https://letsfg.co/connect">https://letsfg.co/connect</a>, where you save a card in a 0.00 Revolut setup — any card, or Revolut Pay / Google Pay; no Revolut account needed, and the card details go to Revolut, never to LetsFG. Nothing is charged until you book, and even then the money is held, not taken, until the airline confirms.</p>
+<p>That works in claude.ai, Claude Desktop, Claude Code (<code>claude mcp add --transport http letsfg https://letsfg.co/developers/api/mcp</code>), ChatGPT, Cursor, Windsurf — anything that speaks remote MCP with OAuth. Over the MCP the token is carried for you. Over raw HTTP send it as <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+<blockquote>
+<p>Prefer the terminal? <strong><code>letsfg auth</code></strong> (npm or PyPI) runs the same connect flow: it registers itself as an OAuth client, opens the card screen for a person to approve, and writes the token to <code>~/.letsfg/config.json</code>. <code>--no-browser</code> prints the URL instead. The SDK and CLI otherwise read the token from <code>LETSFG_BEARER_TOKEN</code> or <code>~/.letsfg/config.json</code>. The old Stripe card setup was retired on 2026-09-02 together with every token it issued.</p>
+</blockquote>
+<h3 id="2-search">2. Search<a class="headerlink" href="#2-search" title="Permanent link">&para;</a></h3>
+<blockquote>
+<p>Find me the cheapest flight from London to Barcelona on June 15</p>
+</blockquote>
+<p>Or from the CLI / SDK with the token in the environment:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>pip<span class="w"> </span>install<span class="w"> </span>letsfg
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="nb">export</span><span class="w"> </span><span class="nv">LETSFG_BEARER_TOKEN</span><span class="o">=</span>eyJ...
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>letsfg<span class="w"> </span>search<span class="w"> </span>LHR<span class="w"> </span>BCN<span class="w"> </span><span class="m">2026</span>-06-15
+</span></code></pre></div>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">letsfg</span><span class="w"> </span><span class="kn">import</span> <span class="n">LetsFG</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="n">bt</span> <span class="o">=</span> <span class="n">LetsFG</span><span class="p">()</span>  <span class="c1"># uses LETSFG_BEARER_TOKEN from environment</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="n">result</span> <span class="o">=</span> <span class="n">bt</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s2">"GDN"</span><span class="p">,</span> <span class="s2">"BCN"</span><span class="p">,</span> <span class="s2">"2026-06-15"</span><span class="p">)</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="k">for</span> <span class="n">offer</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">offers</span><span class="p">[:</span><span class="mi">5</span><span class="p">]:</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">offer</span><span class="o">.</span><span class="n">airlines</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">offer</span><span class="o">.</span><span class="n">currency</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">offer</span><span class="o">.</span><span class="n">price</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Search is free: 10 per 10 minutes, 30 per hour, 100 per day per card. Polling results never counts.</p>
+<h3 id="3-book">3. Book<a class="headerlink" href="#3-book" title="Permanent link">&para;</a></h3>
+<p>Booking works exactly like the website checkout, on the connected card. The fare plus LetsFG's markup is <strong>held</strong> (not taken), a LetsFG booking agent buys the ticket from the seller, and the hold is captured only once a real airline PNR exists. If the booking fails, the hold is released and nothing is charged. Every offer a search returns is bookable this way — there is no unlock step and no separate LetsFG fee.</p>
+<p>Over the MCP: <code>book_flight</code> starts it and returns a <code>booking_ref</code> within seconds; poll <code>get_flight_booking</code> every 20–30 s. A booking takes 4–11 minutes.</p>
+<p>Over HTTP, the same two calls:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1"># Step 1 — start (one traveller per call; real details, the e-ticket goes to contact_email)</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>https://letsfg.co/api/agent-book<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">"Authorization: Bearer eyJ..."</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">  </span>-d<span class="w"> </span><span class="s1">'{"search_id":"ws_abc123","offer_id":"ws_off_...",</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="s1">       "contact_email":"traveller@example.com",</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="s1">       "passenger":{"given_name":"Ada","family_name":"Lovelace","born_on":"1990-04-01",</span>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="s1">                    "gender":"f","nationality":"GB","phone_number":"+15551234567",</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="s1">                    "phone_country":"US","address_line1":"1 Analytical Way",</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="s1">                    "address_city":"London","address_postal":"N1 9GU","address_country":"GB"}}'</span>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="c1"># → {"booking_ref":"eyJ...","state":"booking_in_progress"}</span>
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>
+</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="c1"># Step 2 — poll every 20-30 s</span>
+</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>https://letsfg.co/api/agent-book/status<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-15"><a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">"Authorization: Bearer eyJ..."</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-16"><a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-17"><a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a><span class="w">  </span>-d<span class="w"> </span><span class="s1">'{"booking_ref":"eyJ..."}'</span>
+</span><span id="__span-2-18"><a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a><span class="c1"># → {"state":"completed","pnr":"ABC123","charged_amount":93,"currency":"EUR"}</span>
+</span></code></pre></div>
+<p><code>state</code> walks <code>booking_in_progress</code> → <code>completed</code> (PNR, captured amount) | <code>failed</code> (hold released, nothing charged, <code>failure_reason</code>) | <code>needs_attention</code> (a human at LetsFG is checking it — do not book again). A missing passenger field answers <code>missing_details</code> with <code>missing_fields</code> and charges nothing. Never start a second booking for the same trip while one is in progress.</p>
+<p>Full contract: <a href="../agent-guide/">Building AI Agents</a> and <a href="https://letsfg.co/for-agents">https://letsfg.co/for-agents</a>.</p>
+<hr />
+<h2 id="option-b-public-developer-api">Option B: Public developer API<a class="headerlink" href="#option-b-public-developer-api" title="Permanent link">&para;</a></h2>
+<p>Use this path if you want account-managed cloud search through the website-owned developer API.</p>
+<h3 id="1-register-and-keep-the-api-key">1. Register and keep the API key<a class="headerlink" href="#1-register-and-keep-the-api-key" title="Permanent link">&para;</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>https://letsfg.co/developers/api/v1/agents/register<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span>-d<span class="w"> </span><span class="s1">'{"agent_name": "my-agent", "email": "you@example.com"}'</span>
+</span></code></pre></div>
+<p>Expected response fields include <code>agent_id</code>, <code>api_key</code>, <code>tier</code> and <code>payment_ready</code> (false until a Revolut method is connected).</p>
+<h3 id="2-connect-a-revolut-payment-method">2. Connect a Revolut payment method<a class="headerlink" href="#2-connect-a-revolut-payment-method" title="Permanent link">&para;</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>https://letsfg.co/developers/api/v1/agents/connect-payment<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">"X-API-Key: letsfg_your_api_key"</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">  </span>-d<span class="w"> </span><span class="s1">'{"return_url": "https://example.com/account"}'</span>
+</span></code></pre></div>
+<p>Open the returned <code>connect_url</code> in a browser and save a card or Revolut Pay.
+<strong>Nothing is charged to connect.</strong> The link lasts one hour, and a connected
+method is what opens search.</p>
+<blockquote>
+<p>Stripe was retired on 2026-09-08. <code>setup-payment</code> and <code>hosted-checkout</code> answer
+<code>410 Gone</code> naming this replacement.</p>
+</blockquote>
+<h3 id="3-fund-prepaid-balance-optional">3. Fund prepaid balance (optional)<a class="headerlink" href="#3-fund-prepaid-balance-optional" title="Permanent link">&para;</a></h3>
+<p>Only needed once you exceed the free look-to-book allowance — 200 searches after
+every booking. Balance buys further blocks of 500 for $5.00.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>https://letsfg.co/developers/api/v1/agents/top-up<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">"X-API-Key: letsfg_your_api_key"</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">  </span>-d<span class="w"> </span><span class="s1">'{"amount_cents": 2500}'</span>
+</span></code></pre></div>
+<p>Search is not enabled until balance exists. Top-up is the step that activates public flight search for that key.</p>
+<h3 id="4-run-the-first-public-search">4. Run the first public search<a class="headerlink" href="#4-run-the-first-public-search" title="Permanent link">&para;</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>https://letsfg.co/developers/api/v1/flights/search<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">"X-API-Key: letsfg_your_api_key"</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w">  </span>-d<span class="w"> </span><span class="s1">'{"origin": "LHR", "destination": "JFK", "date_from": "2026-07-15", "adults": 1, "currency": "USD"}'</span>
+</span></code></pre></div>
+<h3 id="5-inspect-account-status">5. Inspect account status<a class="headerlink" href="#5-inspect-account-status" title="Permanent link">&para;</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>curl<span class="w"> </span>https://letsfg.co/developers/api/v1/agents/me<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">"X-API-Key: letsfg_your_api_key"</span>
+</span></code></pre></div>
+<p>The profile response shows whether payment is ready, whether API access is enabled, and how much prepaid balance remains.</p>
+<h2 id="continue-with-the-paid-api-docs">Continue with the paid API docs<a class="headerlink" href="#continue-with-the-paid-api-docs" title="Permanent link">&para;</a></h2>
+<div class="docs-resource-grid">
+  <a class="docs-resource-card" href="api-guide/">
+    <p class="docs-card-kicker">Overview</p>
+    <h3>Public API overview</h3>
+    <p>Get the canonical URLs, lifecycle, and the shortest path through the paid public API docs.</p>
+  </a>
+
+  <a class="docs-resource-card" href="api-onboarding/">
+    <p class="docs-card-kicker">Billing</p>
+    <h3>Onboarding and billing</h3>
+    <p>Register, connect a payment method with connect-payment, and top up prepaid balance when the free look-to-book allowance runs out.</p>
+  </a>
+
+  <a class="docs-resource-card" href="api-search/">
+    <p class="docs-card-kicker">Search</p>
+    <h3>Search and results</h3>
+    <p>See the request fields, location resolution endpoint, provider inspection endpoint, and example responses.</p>
+  </a>
+
+  <a class="docs-resource-card" href="api-errors/">
+    <p class="docs-card-kicker">Ops</p>
+    <h3>Errors and limits</h3>
+    <p>Map account state, request limits, and retry behavior before sending paid traffic into production.</p>
+  </a>
+</div>
+
+<h2 id="common-mistakes">Common mistakes<a class="headerlink" href="#common-mistakes" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Problem</th>
+<th>What it means</th>
+<th>What to do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>401 API key is required</code></td>
+<td>Search was attempted without <code>X-API-Key</code></td>
+<td>Register first and send the returned key</td>
+</tr>
+<tr>
+<td><code>402 payment_method_required</code></td>
+<td>No Revolut method connected</td>
+<td><code>POST /agents/connect-payment</code>, open the <code>connect_url</code></td>
+</tr>
+<tr>
+<td><code>402 search_allowance_exhausted</code></td>
+<td>The look-to-book allowance is used up</td>
+<td>Book a flight (resets it) or <code>POST /agents/top-up</code> to buy a block</td>
+</tr>
+<tr>
+<td><code>403 Fund your prepaid API balance before using flight search</code></td>
+<td>The key exists but public search is not activated on the account</td>
+<td>Check <code>agents/me</code>, then <code>POST /agents/top-up</code></td>
+</tr>
+<tr>
+<td><code>410</code> on <code>setup-payment</code> / <code>hosted-checkout</code></td>
+<td>Retired with Stripe on 2026-09-08</td>
+<td>Call <code>POST /agents/connect-payment</code> and open the <code>connect_url</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="search-flags">Search flags<a class="headerlink" href="#search-flags" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Short</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--return</code></td>
+<td><code>-r</code></td>
+<td><em>(one-way)</em></td>
+<td>Return date for round-trip (YYYY-MM-DD)</td>
+</tr>
+<tr>
+<td><code>--adults</code></td>
+<td><code>-a</code></td>
+<td><code>1</code></td>
+<td>Number of adult passengers (1-9)</td>
+</tr>
+<tr>
+<td><code>--children</code></td>
+<td></td>
+<td><code>0</code></td>
+<td>Number of children (2-11 years)</td>
+</tr>
+<tr>
+<td><code>--cabin</code></td>
+<td><code>-c</code></td>
+<td><em>(any)</em></td>
+<td>Cabin class filter</td>
+</tr>
+<tr>
+<td><code>--max-stops</code></td>
+<td><code>-s</code></td>
+<td><code>2</code></td>
+<td>Maximum stopovers per direction</td>
+</tr>
+<tr>
+<td><code>--currency</code></td>
+<td></td>
+<td><code>EUR</code></td>
+<td>3-letter currency code</td>
+</tr>
+<tr>
+<td><code>--limit</code></td>
+<td><code>-l</code></td>
+<td><code>20</code></td>
+<td>Maximum number of results</td>
+</tr>
+<tr>
+<td><code>--sort</code></td>
+<td></td>
+<td><code>price</code></td>
+<td>Sort by <code>price</code> or <code>duration</code></td>
+</tr>
+<tr>
+<td><code>--json</code></td>
+<td><code>-j</code></td>
+<td></td>
+<td>Output raw JSON</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.tracking", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.tabs.link", "search.highlight", "search.suggest", "toc.follow"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../assets/domain-redirect.js"></script>
+      
+    
+  </body>
+</html>
